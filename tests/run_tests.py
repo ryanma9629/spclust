@@ -1,0 +1,353 @@
+#!/usr/bin/env python3
+"""
+spclust 差分测试。
+
+思路：spclust.cpp 是一个手写 malloc/free + 四向指针 + 十字链表的实现，
+这类代码最容易在边界上出错，而它的正确性无法靠读代码确认。
+
+所以这里做三方交叉验证：
+
+  1. oracle(brute) —— 完全按定义、每步从原始稠密矩阵重算。最可信，但 O(n^4)。
+  2. oracle(fast)  —— 用恒等式增量维护聚合量。先要求 brute/fast 一致，
+                      一致后才有资格去测大数据。
+  3. spclust       —— 被测对象。
+
+三者独立实现。spclust 与 oracle 的逐次合并（成员集合 + 相似度）必须一致，
+除了两种可解释的合法分歧：
+  * 并列最大（合并顺序不确定）
+  * 相似度被截断成 unsigned short 后产生并列（oracle 用精确分数，不会并列）
+
+已知/已确认的分歧放在 tests/known_divergences.txt 里，需要写明理由。
+
+用法：
+    make test
+    python3 tests/run_tests.py --bin-prefix ./spclust-linkage- --min-sim 50
+    python3 tests/run_tests.py --only average --verbose
+"""
+
+import argparse
+import random
+import subprocess
+import sys
+import tempfile
+from fractions import Fraction
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+REPO = HERE.parent
+sys.path.insert(0, str(HERE))
+
+import oracle  # noqa: E402
+
+LINKAGE_BY_MTD = {0: "average", 1: "max", 2: "min"}
+MTD_BY_LINKAGE = {v: k for k, v in LINKAGE_BY_MTD.items()}
+
+# 超过这个规模就不跑 O(n^4) 的 brute oracle 了
+BRUTE_MAX_N = 24
+
+# 随机用例：(对象数, 边密度, 种子)
+RANDOM_CONFIGS = [
+    (10, 0.30, 1), (10, 0.30, 2), (10, 0.30, 3),
+    (18, 0.45, 1), (18, 0.45, 2), (18, 0.45, 3),
+    (24, 0.65, 1), (24, 0.65, 2),
+    (12, 1.00, 1), (12, 1.00, 2),
+    (44, 0.25, 1), (44, 0.80, 1),
+]
+
+OUTCOME_ORDER = ("PASS", "WARN", "KNOWN", "TRUNC", "DRIFT", "XPASS", "FAIL", "ORACLE")
+
+
+def obj_names(member_ids, order):
+    return [order[i] for i in sorted(member_ids)]
+
+
+def gen_random_case(rng, n, density, tag):
+    """生成一个随机稀疏图用例。相似度取不重复的值，尽量避开并列。"""
+    pairs = [(i, j) for i in range(n) for j in range(i + 1, n) if rng.random() < density]
+    if not pairs:
+        return None
+    k = len(pairs)
+    if k <= 299:
+        vals = rng.sample(range(1, 300), k)
+    else:
+        vals = rng.sample(range(1, 65535), k)
+    lines = [
+        f"# 随机用例 n={n} density={density} tag={tag}（相似度互不相同）",
+    ]
+    lines += [f"r{i:02d},r{j:02d},{v}" for (i, j), v in zip(pairs, vals)]
+    return "\n".join(lines) + "\n"
+
+
+def load_known_divergences():
+    path = HERE / "known_divergences.txt"
+    known = {}
+    if not path.exists():
+        return known
+    for raw in path.read_text().splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            raise SystemExit(f"known_divergences.txt 格式错误（应为 '用例 linkage 理由'）: {raw!r}")
+        known[(parts[0], parts[1])] = parts[2]
+    return known
+
+
+def collect_cases(args):
+    cases = []
+    for p in sorted((HERE / "cases").glob("*.csv")):
+        cases.append((p.name, p.read_text(), None))
+    if args.no_random:
+        return cases
+    for n, dens, seed in RANDOM_CONFIGS:
+        if args.quick and n > BRUTE_MAX_N:
+            continue
+        rng = random.Random(n * 100000 + int(dens * 100) * 1000 + seed)
+        tag = f"n{n}d{int(dens * 100)}s{seed}"
+        text = gen_random_case(rng, n, dens, tag)
+        if text:
+            cases.append((f"rand_{tag}.csv", text, tag))
+    return cases
+
+
+def run_spclust(bin_path, case_path):
+    proc = subprocess.run(
+        [str(bin_path), str(case_path)],
+        cwd=str(REPO), capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        raise RuntimeError(f"spclust 退出码 {proc.returncode}:\n{proc.stderr}")
+    return proc.stdout
+
+
+def values_equal(linkage, oracle_val, spclust_val):
+    """oracle 用精确分数；spclust 存 unsigned short（截断）。"""
+    if linkage == "average":
+        return oracle_val.numerator // oracle_val.denominator == spclust_val
+    return oracle_val == spclust_val
+
+
+def merge_multiset(res):
+    """把合并序列看成“合并了哪些集合对”的多重集（忽略顺序）。"""
+    out = []
+    for (A, B), _v in res["merges"]:
+        a, b = tuple(sorted(A)), tuple(sorted(B))
+        out.append((a, b) if a < b else (b, a))
+    return sorted(out)
+
+
+def trunc_explains(o, o_trunc, got, linkage):
+    """spclust 与精确定义的偏差是否完全由 unsigned short 截断解释。
+
+    包含两件事：
+      a) 逐次值被截断（每步少最多 1，且会累积）
+      b) 截断可能把两个不同的值（如 262.5 和 262.0）压成同一个值，产生并列，
+         而并列的打破顺序是实现细节
+
+    因此要求：
+      1) 在第一次“截断造成并列”之前，截断镜像与 spclust 逐次完全一致（集合 + 值）
+      2) 两边执行的合并（作为多重集）相同
+      3) 最终分组相同
+    """
+    ts = o["trunc_steps"]
+    om_list, gm_list = o_trunc["merges"], got["merges"]
+    if ts:
+        # 只要求“第一次截断造成并列”之前完全一致，之后允许并列导致的顺序不同
+        limit = min(min(ts), len(om_list), len(gm_list))
+    else:
+        # 没有截断并列，那就得全程一致
+        if len(om_list) != len(gm_list):
+            return False
+        limit = len(om_list)
+    for k in range(limit):
+        if om_list[k][0] != gm_list[k][0] \
+                or not values_equal(linkage, om_list[k][1], gm_list[k][1]):
+            return False
+    return (merge_multiset(o_trunc) == merge_multiset(got)
+            and o_trunc["partition"] == got["partition"])
+
+
+def compare(o, got, linkage, order):
+    """返回 (outcome, detail)。o 是 oracle 结果，got 是解析出的 spclust 结果。"""
+    om, gm = o["merges"], got["merges"]
+
+    # 找第一次分歧
+    k = None
+    for i in range(min(len(om), len(gm))):
+        if om[i][0] != gm[i][0]:
+            k = i
+            break
+    if k is None and len(om) != len(gm):
+        k = min(len(om), len(gm))
+
+    if k is None:
+        drift = [i for i in range(len(om)) if not values_equal(linkage, om[i][1], gm[i][1])]
+        if o["partition"] != got["partition"]:
+            return "FAIL", "merge 全一致但最终分组不同"
+        if drift:
+            return "DRIFT", f"{len(drift)} 步相似度不一致，第 {drift[0]} 步: " \
+                           f"oracle={float(om[drift[0]][1]):.4f} spclust={gm[drift[0]][1]}"
+        return "PASS", ""
+
+    ties = sorted(set(o["tie_steps"]) | set(o["trunc_steps"]))
+    tie_explains = any(t <= k for t in ties)
+
+    detail = []
+    if k < len(om) and k < len(gm):
+        A, B = om[k][0]
+        C, D = gm[k][0]
+        detail.append(f"第 {k} 步: oracle 合并 {obj_names(A, order)}|{obj_names(B, order)}"
+                      f"(sim={float(om[k][1]):.4f}) "
+                      f"vs spclust {obj_names(C, order)}|{obj_names(D, order)}(sim={gm[k][1]})")
+    else:
+        detail.append(f"第 {k} 步起停止位置不同: oracle 共 {len(om)} 次合并，spclust {len(gm)} 次")
+    detail.append("oracle 分组=" + str(sorted(sorted(obj_names(g, order)) for g in o["partition"])))
+    detail.append("spclust 分组=" + str(sorted(sorted(obj_names(g, order)) for g in got["partition"])))
+    if ties:
+        detail.append(f"并列/截断发生在第 {ties} 步")
+
+    return ("WARN" if tie_explains else "FAIL"), "; ".join(detail)
+
+
+def main(argv=None):
+    ap = argparse.ArgumentParser(description="spclust 差分测试")
+    ap.add_argument("--bin-prefix", default="./spclust-linkage-",
+                    help="按 LINKAGE_MTD 编号的二进制前缀，默认 ./spclust-linkage-")
+    ap.add_argument("--min-sim", type=int, default=50,
+                    help="必须与二进制编译时的 MIN_SIM_CLUST 一致")
+    ap.add_argument("--only", choices=sorted(LINKAGE_BY_MTD.values()),
+                    help="只测某一种 linkage")
+    ap.add_argument("--case", help="只跑文件名包含该子串的用例")
+    ap.add_argument("--quick", action="store_true", help="跳过大规模用例")
+    ap.add_argument("--no-random", action="store_true", help="只跑 tests/cases 下的手写用例")
+    ap.add_argument("--verbose", action="store_true")
+    args = ap.parse_args(argv)
+
+    linkages = [args.only] if args.only else sorted(LINKAGE_BY_MTD.values())
+
+    # 检查二进制
+    for lk in linkages:
+        p = REPO / f"{args.bin_prefix}{MTD_BY_LINKAGE[lk]}"
+        if not p.exists():
+            raise SystemExit(f"找不到 {p}，先跑 `make linkages`（或直接用 `make test`）")
+
+    known = load_known_divergences()
+    cases = collect_cases(args)
+    if args.case:
+        cases = [c for c in cases if args.case in c[0]]
+    if not cases:
+        raise SystemExit("没有匹配的用例")
+
+    print("=" * 78)
+    print(f"spclust 差分测试   用例 {len(cases)} 个   linkage {linkages}   min_sim={args.min_sim}")
+    print("=" * 78)
+
+    counts = {lk: {} for lk in linkages}
+    failures = []
+    notes = []
+    selfcheck = 0
+    trunc_impact = 0
+    tmpdir = tempfile.TemporaryDirectory()
+    tmp = Path(tmpdir.name)
+
+    for name, text, _tag in cases:
+        case_path = tmp / name
+        case_path.write_text(text)
+
+        order, edges, warnings = oracle.load_edges(str(case_path))
+        for w in warnings:
+            notes.append(f"{name}: {w}")
+        if len(order) < 2:
+            notes.append(f"{name}: 对象少于 2 个，跳过")
+            continue
+
+        for lk in linkages:
+            # oracle 自检：小规模时同时跑 brute（每步按定义重算）和 fast（增量维护），
+            # 两者必须逐次一致，否则是测试工具自身的问题，而不是 spclust 的问题。
+            use_brute = len(order) <= BRUTE_MAX_N
+            o = oracle.hac(order, edges, lk, args.min_sim, "brute" if use_brute else "fast")
+            outcome, detail = None, ""
+            if use_brute:
+                o_fast = oracle.hac(order, edges, lk, args.min_sim, "fast")
+                if o["merges"] != o_fast["merges"] or o["partition"] != o_fast["partition"]:
+                    outcome, detail = "ORACLE", "brute 与 fast 两个 oracle 实现不一致"
+                else:
+                    selfcheck += 1
+
+            # “截断镜像”：验证 spclust 与精确定义的偏差是否完全来自 unsigned short 截断
+            o_trunc = oracle.hac(order, edges, lk, args.min_sim, "trunc")
+
+            if outcome is None:
+                got = oracle.parse_spclust(run_spclust(REPO / f"{args.bin_prefix}{MTD_BY_LINKAGE[lk]}",
+                                                       case_path), order)
+                outcome, detail = compare(o, got, lk, order)
+
+                if outcome != "PASS" and o_trunc["merges"] != o["merges"] \
+                        and trunc_explains(o, o_trunc, got, lk):
+                    outcome = "TRUNC"
+                    if o["partition"] != got["partition"]:
+                        trunc_impact += 1
+                        detail = "最终分组也因此改变; " + detail
+                elif (name, lk) in known and outcome in ("FAIL", "DRIFT", "WARN"):
+                    detail = f"[已知] {known[(name, lk)]} -- {detail}"
+                    outcome = "KNOWN"
+                elif (name, lk) in known and outcome == "PASS":
+                    outcome = "XPASS"
+                    detail = f"[已知分歧已消失] {known[(name, lk)]}"
+
+            counts[lk][outcome] = counts[lk].get(outcome, 0) + 1
+            if outcome in ("FAIL", "ORACLE"):
+                failures.append((lk, name, detail))
+
+            flag = {"PASS": "  ", "WARN": "~ ", "KNOWN": "k ", "TRUNC": "t ", "DRIFT": "! ",
+                    "XPASS": "? ", "FAIL": "X ", "ORACLE": "X "}[outcome]
+            print(f"{flag}[{lk:^7}] {name:<26} {outcome:<7} merges={o['merge_count']:<3} "
+                  f"groups={len(o['groups'])}"
+                  + (f"  {detail}" if args.verbose or outcome in ("FAIL", "ORACLE", "DRIFT", "TRUNC") else ""))
+            if o["duplicate_pairs"] and outcome in ("PASS", "TRUNC"):
+                notes.append(f"{name}/{lk}: 输入含 {o['duplicate_pairs']} 条重复 pair")
+
+    tmpdir.cleanup()
+
+    print("-" * 78)
+    total = {k: 0 for k in OUTCOME_ORDER}
+    for lk in linkages:
+        row = "  ".join(f"{k}={counts[lk].get(k, 0)}"
+                        for k in OUTCOME_ORDER
+                        if counts[lk].get(k, 0))
+        print(f"{lk:^7}: {row}")
+        for k, v in counts[lk].items():
+            total[k] += v
+    print("-" * 78)
+    print(f"oracle 自检（brute 与 fast 逐次一致）: {selfcheck} 次")
+    if total["TRUNC"]:
+        print(f"其中 {trunc_impact} 个用例的最终分组因截断而改变")
+    print(f"合计: PASS={total['PASS']} WARN={total['WARN']} KNOWN={total['KNOWN']} "
+          f"TRUNC={total['TRUNC']} DRIFT={total['DRIFT']} XPASS={total['XPASS']} "
+          f"FAIL={total['FAIL']} ORACLE={total['ORACLE']}")
+
+    if notes:
+        print()
+        print("备注:")
+        for n in notes:
+            print(f"  - {n}")
+
+    if failures:
+        print()
+        print("失败详情:")
+        for lk, name, detail in failures:
+            print(f"  [{lk}] {name}")
+            for part in detail.split("; "):
+                print(f"      {part}")
+
+    # XPASS（已知分歧消失）不算失败：它依赖阈值 —— 例如某用例在某阈值下根本不合并，
+    # 重复 pair 之类的分歧就自然消失了。但它会被打印出来，便于清理过期的记录。
+    ok = not failures and total["DRIFT"] == 0
+    print()
+    print("RESULT:", "PASS" if ok else "FAIL")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

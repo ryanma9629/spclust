@@ -1,0 +1,7 @@
+# 同一个 pair 出现两次且 sim 不同。
+# readdb.cpp/readdb 会把两条都插进结构，于是 get_max()（取行内 max）看到 90，
+# 而 get_unit()（沿行链从头找第一个匹配）可能拿到 80 —— 两者不一致，疑似 bug。
+a,b,90
+a,b,80
+c,d,70
+e,f,60

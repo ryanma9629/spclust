@@ -1,0 +1,8 @@
+# 专门触发"行/列更新集合重叠"的配置：group1 < i < group2 且 (group1,i)、(i,group2) 都存在。
+# 这里 group1=0(a)、i=1(b)、group2=2(c)，(a,c)=90 是全局最大，
+# 合并 a 与 c 时 b 仍然活着，于是 b 同时落在 update_dim1 和 update_dim2 里，
+# spclust.cpp 的两次 add_grp(1, new_grp, ...) 会插入两个完全相同的单元
+# （两次算出的值一致，因此结果不受影响，只是多占一点内存）。
+a,b,10
+b,c,10
+a,c,90
