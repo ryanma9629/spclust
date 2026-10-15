@@ -30,6 +30,8 @@ bool grp_greater(const size_t& a, const size_t& b) {
 }
 
 void print_result(void) {
+	//spclust.cpp 的 DEBUG=2 日志把 cout 的精度调到了 12，这里显式改回 6 位有效数字
+	cout << setprecision(6);
 	vector<size_t> clusters;
 	size_t n_objects = 0;
 	for (size_t i = 0; i < grp.size(); i++) {

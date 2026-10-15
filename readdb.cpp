@@ -41,18 +41,19 @@ void split_fields(const string& line, vector<string>& out) {
 	}
 }
 
-//严格解析相似度：必须是 [0,65535] 范围内的十进制整数
-bool parse_sim(const string& s, unsigned short& out) {
+//严格解析相似度：必须是 [0,65535] 范围内的十进制数（允许小数，如 87.5）
+bool parse_sim(const string& s, double& out) {
 	if (s.empty())
 		return false;
 	char* end = NULL;
 	errno = 0;
-	long v = strtol(s.c_str(), &end, 10);
+	double v = strtod(s.c_str(), &end);
 	if (0 != errno || end == s.c_str() || '\0' != *end)
 		return false;
-	if (v < 0 || v > 65535)
+	//注意不能写成 (v < 0 || v > 65535)：那样 "nan" 会静默通过
+	if (!(v >= 0.0 && v <= 65535.0))
 		return false;
-	out = (unsigned short)v;
+	out = v;
 	return true;
 }
 

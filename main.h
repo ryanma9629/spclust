@@ -74,7 +74,7 @@ using namespace std;
 struct sp_sim {
 	string obj1;
 	string obj2;
-	unsigned short sim;
+	double sim;
 };
 
 
@@ -88,7 +88,7 @@ struct sp_unit {
 	sp_unit *up;
 	size_t group1;
 	size_t group2;
-	unsigned short sim;
+	double sim;
 };
 //“左向量”中的元素
 struct p_dim1 {
@@ -101,7 +101,7 @@ struct p_dim2 {
 };
 //聚类结果的元素，组内相似性+成员列表
 struct grp_s {
-	unsigned short sim;
+	double sim;
 	vector<string> objs;
 };
 #endif

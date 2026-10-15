@@ -15,9 +15,12 @@ spclust 差分测试。
 三者独立实现。spclust 与 oracle 的逐次合并（成员集合 + 相似度）必须一致，
 除了两种可解释的合法分歧：
   * 并列最大（合并顺序不确定）
-  * 相似度被截断成 unsigned short 后产生并列（oracle 用精确分数，不会并列）
+  * 相似度被截断成整数后产生并列
 
 已知/已确认的分歧放在 tests/known_divergences.txt 里，需要写明理由。
+
+另有一重回归护栏：若 spclust 退回用 unsigned short 存相似度（每步截断、误差会累积），
+差分测试会把偏差归类为 TRUNC 并**判定失败** —— 那个 bug 已修复，不该回来。
 
 用法：
     make test
@@ -55,6 +58,12 @@ RANDOM_CONFIGS = [
 ]
 
 OUTCOME_ORDER = ("PASS", "WARN", "KNOWN", "TRUNC", "DRIFT", "XPASS", "FAIL", "ORACLE")
+
+# 相对/绝对容差：oracle 用精确分数，spclust 用 double，链接值是浮点累加出来的。
+# 1e-9 足够宽到容忍舍入误差，又远小于任何真实偏差
+#（1 个单位在 ~100 的量级上就是 1e-2）。
+REL_TOL = 1e-9
+ABS_TOL = 1e-9
 
 
 def obj_names(member_ids, order):
@@ -121,11 +130,10 @@ def run_spclust(bin_path, case_path):
     return proc.stdout
 
 
-def values_equal(linkage, oracle_val, spclust_val):
-    """oracle 用精确分数；spclust 存 unsigned short（截断）。"""
-    if linkage == "average":
-        return oracle_val.numerator // oracle_val.denominator == spclust_val
-    return oracle_val == spclust_val
+def values_equal(oracle_val, spclust_val):
+    """oracle 是精确分数，spclust 是 double —— 按相对误差比较。"""
+    a, b = float(oracle_val), float(spclust_val)
+    return abs(a - b) <= ABS_TOL + REL_TOL * max(abs(a), abs(b))
 
 
 def merge_multiset(res):
@@ -137,7 +145,7 @@ def merge_multiset(res):
     return sorted(out)
 
 
-def trunc_explains(o, o_trunc, got, linkage):
+def trunc_explains(o, o_trunc, got):
     """spclust 与精确定义的偏差是否完全由 unsigned short 截断解释。
 
     包含两件事：
@@ -162,13 +170,13 @@ def trunc_explains(o, o_trunc, got, linkage):
         limit = len(om_list)
     for k in range(limit):
         if om_list[k][0] != gm_list[k][0] \
-                or not values_equal(linkage, om_list[k][1], gm_list[k][1]):
+                or not values_equal(om_list[k][1], gm_list[k][1]):
             return False
     return (merge_multiset(o_trunc) == merge_multiset(got)
             and o_trunc["partition"] == got["partition"])
 
 
-def compare(o, got, linkage, order):
+def compare(o, got, order):
     """返回 (outcome, detail)。o 是 oracle 结果，got 是解析出的 spclust 结果。"""
     om, gm = o["merges"], got["merges"]
 
@@ -182,12 +190,12 @@ def compare(o, got, linkage, order):
         k = min(len(om), len(gm))
 
     if k is None:
-        drift = [i for i in range(len(om)) if not values_equal(linkage, om[i][1], gm[i][1])]
+        drift = [i for i in range(len(om)) if not values_equal(om[i][1], gm[i][1])]
         if o["partition"] != got["partition"]:
             return "FAIL", "merge 全一致但最终分组不同"
         if drift:
             return "DRIFT", f"{len(drift)} 步相似度不一致，第 {drift[0]} 步: " \
-                           f"oracle={float(om[drift[0]][1]):.4f} spclust={gm[drift[0]][1]}"
+                           f"oracle={float(om[drift[0]][1]):.6f} spclust={float(gm[drift[0]][1]):.6f}"
         return "PASS", ""
 
     ties = sorted(set(o["tie_steps"]) | set(o["trunc_steps"]))
@@ -198,8 +206,8 @@ def compare(o, got, linkage, order):
         A, B = om[k][0]
         C, D = gm[k][0]
         detail.append(f"第 {k} 步: oracle 合并 {obj_names(A, order)}|{obj_names(B, order)}"
-                      f"(sim={float(om[k][1]):.4f}) "
-                      f"vs spclust {obj_names(C, order)}|{obj_names(D, order)}(sim={gm[k][1]})")
+                      f"(sim={float(om[k][1]):.6f}) "
+                      f"vs spclust {obj_names(C, order)}|{obj_names(D, order)}(sim={float(gm[k][1]):.6f})")
     else:
         detail.append(f"第 {k} 步起停止位置不同: oracle 共 {len(om)} 次合并，spclust {len(gm)} 次")
     detail.append("oracle 分组=" + str(sorted(sorted(obj_names(g, order)) for g in o["partition"])))
@@ -247,7 +255,6 @@ def main(argv=None):
     failures = []
     notes = []
     selfcheck = 0
-    trunc_impact = 0
     tmpdir = tempfile.TemporaryDirectory()
     tmp = Path(tmpdir.name)
 
@@ -281,14 +288,14 @@ def main(argv=None):
             if outcome is None:
                 got = oracle.parse_spclust(run_spclust(REPO / f"{args.bin_prefix}{MTD_BY_LINKAGE[lk]}",
                                                        case_path), order)
-                outcome, detail = compare(o, got, lk, order)
+                outcome, detail = compare(o, got, order)
 
                 if outcome != "PASS" and o_trunc["merges"] != o["merges"] \
-                        and trunc_explains(o, o_trunc, got, lk):
+                        and trunc_explains(o, o_trunc, got):
+                    # 偏差能由“每步截断成整数”解释 —— 即旧的 unsigned short 问题回来了
                     outcome = "TRUNC"
-                    if o["partition"] != got["partition"]:
-                        trunc_impact += 1
-                        detail = "最终分组也因此改变; " + detail
+                    detail = "【回归】偏差可由 unsigned short 整数截断解释；" \
+                             "spclust 的相似度应当是 double: " + detail
                 elif (name, lk) in known and outcome in ("FAIL", "DRIFT", "WARN"):
                     detail = f"[已知] {known[(name, lk)]} -- {detail}"
                     outcome = "KNOWN"
@@ -297,7 +304,7 @@ def main(argv=None):
                     detail = f"[已知分歧已消失] {known[(name, lk)]}"
 
             counts[lk][outcome] = counts[lk].get(outcome, 0) + 1
-            if outcome in ("FAIL", "ORACLE"):
+            if outcome in ("FAIL", "ORACLE", "TRUNC"):
                 failures.append((lk, name, detail))
 
             flag = {"PASS": "  ", "WARN": "~ ", "KNOWN": "k ", "TRUNC": "t ", "DRIFT": "! ",
@@ -321,8 +328,6 @@ def main(argv=None):
             total[k] += v
     print("-" * 78)
     print(f"oracle 自检（brute 与 fast 逐次一致）: {selfcheck} 次")
-    if total["TRUNC"]:
-        print(f"其中 {trunc_impact} 个用例的最终分组因截断而改变")
     print(f"合计: PASS={total['PASS']} WARN={total['WARN']} KNOWN={total['KNOWN']} "
           f"TRUNC={total['TRUNC']} DRIFT={total['DRIFT']} XPASS={total['XPASS']} "
           f"FAIL={total['FAIL']} ORACLE={total['ORACLE']}")
@@ -343,6 +348,7 @@ def main(argv=None):
 
     # XPASS（已知分歧消失）不算失败：它依赖阈值 —— 例如某用例在某阈值下根本不合并，
     # 重复 pair 之类的分歧就自然消失了。但它会被打印出来，便于清理过期的记录。
+    # TRUNC 则算失败：它意味着 unsigned short 截断那个 bug 又回来了。
     ok = not failures and total["DRIFT"] == 0
     print()
     print("RESULT:", "PASS" if ok else "FAIL")

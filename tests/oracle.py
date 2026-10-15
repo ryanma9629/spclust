@@ -16,16 +16,19 @@ spclust 的独立参考实现（oracle），用于差分测试。
 
 每步取全局最大的簇对合并；若该值 < min_sim 则停止。
 
-两种模式，互相独立：
+三种模式：
   brute —— 每步直接从原始稠密矩阵按定义重算。最可信，但 O(n^4)，只适合小数据。
   fast  —— 用恒等式增量维护：
              sum(A∪B, C) = sum(A,C) + sum(B,C)
              max(A∪B, C) = max(max(A,C), max(B,C))
              min(A∪B, C) = min(min(A,C), min(B,C))
            然后每步仍按定义（除以 |A|*|B|）算出链接值。适合大数据。
+  trunc —— 镜像 spclust **修复前**的 unsigned short 整数语义。
+           它不是独立 oracle，而是回归护栏：若 spclust 又退回整数截断，
+           差分测试会用它把偏差归类为 TRUNC 并判定失败。
 runner 会先用 brute 跑全部小用例，并交叉验证 fast 与 brute 一致。
 
-全程用整数精确运算（值表示为 (分子, 分母)），不引入浮点误差。
+全程用 Fraction 精确运算（也允许小数输入，如 87.5），不引入浮点误差。
 
 命令行用法（调试用）：
     python3 tests/oracle.py sim.csv --linkage average --min-sim 50
@@ -40,6 +43,19 @@ LINKAGES = ("average", "max", "min")
 
 # spclust 的 LINKAGE_MTD -> 本文件的 linkage 名
 LINKAGE_BY_MTD = {0: "average", 1: "max", 2: "min"}
+
+
+def to_fraction(s):
+    """把字符串解析成精确分数。不合法返回 None。"""
+    try:
+        return Fraction(s.strip())  # "90" / "87.5" / "175/2"
+    except (ValueError, ZeroDivisionError):
+        pass
+    try:
+        # 容忍 "1e-05" 之类的指数写法；nan / inf 会在这里被挡掉
+        return Fraction(*float(s).as_integer_ratio())
+    except (ValueError, OverflowError):
+        return None
 
 
 def load_edges(path):
@@ -71,9 +87,8 @@ def load_edges(path):
         if not a or not b:
             warnings.append(f"{path}:{lineno}: 对象名为空，跳过")
             continue
-        try:
-            v = int(s)
-        except ValueError:
+        v = to_fraction(s)
+        if v is None:
             # 只容忍开头的表头行
             if not edges and [x.lower() for x in fields[:3]] == ["obj1", "obj2", "sim"]:
                 continue
@@ -262,9 +277,9 @@ def hac(order, edges, linkage="average", min_sim=50, mode="brute"):
 # ---------------------------------------------------------------------------
 
 RE_MERGE = re.compile(
-    r"Group (\d+) and group (\d+) are merged into group (\d+) \(sim=(\d+)\)\."
+    r"Group (\d+) and group (\d+) are merged into group (\d+) \(sim=([0-9.eE+-]+)\)\."
 )
-RE_GROUP = re.compile(r"^Group (\d+) \(size=(\d+), sim=(\d+)\): (.*)$")
+RE_GROUP = re.compile(r"^Group (\d+) \(size=(\d+), sim=([0-9.eE+-]+)\): (.*)$")
 RE_SINGLE = re.compile(r"^Unclustered \((\d+)\): (.*)$")
 RE_OBJECTS = re.compile(r"^Objects: (\d+), groups: (\d+)$")
 
@@ -291,11 +306,14 @@ def parse_spclust(text, order):
 
         m = RE_MERGE.search(line)
         if m:
-            g1, g2, g3, sim = (int(m.group(k)) for k in (1, 2, 3, 4))
+            g1, g2, g3 = (int(m.group(k)) for k in (1, 2, 3))
+            sim = to_fraction(m.group(4))
+            if sim is None:
+                raise ValueError(f"无法解析日志里的 sim: {line!r}")
             if g1 not in members or g2 not in members:
                 raise ValueError(f"merge 日志引用了未知组号: {line!r}")
             A, B = frozenset(members[g1]), frozenset(members[g2])
-            merges.append((_canon(A, B), Fraction(sim)))
+            merges.append((_canon(A, B), sim))
             members[g3] = members[g1] + members[g2]
             continue
 
@@ -366,7 +384,7 @@ def main(argv):
           f"{r['objects']} objects, {len(r['groups'])} groups")
     for g in r["groups"]:
         if len(g) >= 2:
-            print(f"  size={len(g):<4} sim={r['merges'] and ''}{g}")
+            print(f"  size={len(g):<4} {g}")
     singles = sorted(x for g in r["groups"] if len(g) == 1 for x in g)
     if singles:
         print(f"  Unclustered ({len(singles)}): {singles}")

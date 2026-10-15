@@ -63,7 +63,7 @@ make help
 
 `obj1,obj2,sim`，一行一条。也可以从标准输入读（`./spclust < data.csv` 或 `./spclust -`）。
 
-- `sim`：0..65535 的整数；低于 `MIN_SIM_CLUST` 的边只作为候选，不会被合并
+- `sim`：0..65535 的实数（**允许小数**，如 87.5）；低于 `MIN_SIM_CLUST` 的边只作为候选，不会被合并
 - 分隔符：含逗号按逗号拆，否则按空白（空格/Tab）拆
 - `#` 开头是注释；空行忽略
 - 可选的表头行 `obj1,obj2,sim` 会被自动跳过
@@ -76,14 +76,15 @@ make help
 ```
 Linkage=0=average, min_sim=50
 Objects: 16, groups: 3
-Group 0 (size=5, sim=90): a4 a5 a3 a1 a2
-Group 1 (size=4, sim=87): b1 b2 b3 b4
+Group 0 (size=5, sim=90.5): a4 a5 a3 a1 a2
+Group 1 (size=4, sim=87.6667): b4 b3 b1 b2
 Group 2 (size=3, sim=82): c3 c1 c2
 Unclustered (4): d1 d2 e1 e2
 ```
 
 `sim` 是**组内平均相似度**（average linkage 下按组大小加权累加得到），可以当作簇的紧致度。
 只列出 size>=2 的簇，剩下的单元素对象列在 `Unclustered` 里。
+注：修复前这里是截断后的整数（`sim=90` / `sim=87`），现在才是真实的平均值。
 
 ## 测试（差分验证）
 
@@ -123,18 +124,28 @@ python3 tests/run_tests.py --quick --case 15_   # 只跑指定用例
 python3 tests/oracle.py sim.csv --linkage average --min-sim 50   # 单独用 oracle 看结果
 ```
 
-当前结果（`min_sim=50`，20 个手写 + 12 个随机 × 3 种 linkage = 96 次比对）：
+当前结果（`min_sim=50`，21 个手写 + 12 个随机 × 3 种 linkage = 99 次比对）：
 
 ```
-PASS=71  WARN=7  KNOWN=6  TRUNC=12  DRIFT=0  FAIL=0  ORACLE=0
-oracle 自检（brute 与 fast 逐次一致）: 90 次
+PASS=86  WARN=7  KNOWN=6  TRUNC=0  DRIFT=0  FAIL=0  ORACLE=0
+oracle 自检（brute 与 fast 逐次一致）: 93 次
 RESULT: PASS
 ```
 
 结论：**`spclust.cpp` 的链表维护本身是可靠的** —— 在 44 个对象、43 次连续合并、
-六种输入形态（含稠密完全图、星型、长链、多连通分量、零相似度边、逆序输入）上，
-`max`/`min` 两种链接的 60 次比对里只有 WARN（并列）和已记录的分歧，没有任何未解释的偏差。
-所有偏差都集中在 `average`，且全部定位到了下面两个原因。
+七种输入形态（含稠密完全图、星型、长链、多连通分量、零相似度边、逆序输入、小数相似度）上，
+`max`/`min` 两种链接的 62 次比对里只有 WARN（并列）和已登记的重复-pair 分歧。
+
+另外 `average` 的相似度经修复后与精确定义的残差是纯浮点量级：
+
+```
+排除两个重复-pair 语义用例，146 次逐次相似度比对：
+  最大绝对误差 = 3.3e-11
+  最大相对误差 = 4.3e-13   （DEBUG 日志保留 12 位有效数字，这基本就是打印精度）
+```
+
+`TRUNC` 现在是**回归护栏**：如果谁把相似度改回 `unsigned short`，那 12 个 `TRUNC` 会
+全部重新出现，而 `TRUNC` 算**失败**。
 
 ## 可调参数
 
@@ -155,7 +166,7 @@ make run LINKAGE=1 MIN_SIM=60 DEBUG=2
 ## 与原 Windows/ODBC 版本的差异
 
 原版用 `<windows.h>` + `_tmain` + ODBC 从 MySQL 的 `test.sim100` 读数据，只能在 Windows/MSVC 下编译。
-本次移植（`spclust.cpp` **一行未改**）：
+移植阶段 `spclust.cpp` **一行未改**；之后的相似度精度修复动了它（见「已修复」）：
 
 | 文件 | 改动 |
 |---|---|
@@ -163,40 +174,51 @@ make run LINKAGE=1 MIN_SIM=60 DEBUG=2
 | `main.cpp` | `_tmain(argc, _TCHAR* argv[])` → `main(argc, char* argv[])`；支持可选输入文件参数；打印结果（原来那段被注释掉了） |
 | `readdb.h` | 签名由 `readdb(void)` 改为 `readdb(const char* path)`；删掉 ODBC 专用的 `odbc_show_err` |
 | `readdb.cpp` | 整个 ODBC 读取换成 CSV / 标准输入读取；不再有 `char obj1[32]` 的截断限制 |
+| `spclust.cpp` / `spclust.h` | 只在精度修复里改（`unsigned short` → `double`） |
 | `Makefile` / `sim.csv` / `.gitignore` | 新增 |
-| `tests/` | 新增：独立 oracle + 20 个边界用例 + 差分测试 runner |
+| `tests/` | 新增：独立 oracle + 21 个边界用例 + 差分测试 runner |
 
 原来的 `readdb.cpp` 还在 git 历史里：`git show 9c1afc7:readdb.cpp`。
 
-## 已知问题
+## 已修复
 
-`spclust.cpp` 未改动，以下都是实测/静态分析得出的结论。
-前三项**已由 `make test` 复现**（有对应标记），后面几项只是静态分析。
+### `average` 的相似度曾用 `unsigned short` 存，每步截断一次，误差会累积
 
-### 1. `average` 的相似度用 `unsigned short` 存，每步截断一次，误差会累积（`TRUNC`）
-
-`spclust.cpp:196` 的 average 更新是
+修复前的 `spclust.cpp:196`：
 
 ```cpp
 unsigned short sim = (sim1 * group1_size + sim2 * group2_size) / (group1_size + group2_size);
 ```
 
 整数除法截断，结果又存回 `unsigned short`，于是**每次合并都向下丢一点**，并且丢掉的量会
-参与下一步计算继续传播。实测偏差会累积到十几：
+参与下一步计算继续传播。`make test` 当时报了 12 个 `TRUNC`：
 
 ```
-用例 rand_n44d80s1.csv（44 对象）：15 次合并里有 12 步的值比精确定义低，
-第 27 步 oracle=41869.6 / spclust=41868
+rand_n44d80s1.csv（44 对象）第 27 步: oracle=41869.6  spclust=41868   （15 次合并里 12 步偏低）
+rand_n10d30s3.csv: 截断把 262.5 和 262.0 压成同一个值 262 → 产生并列
+                   → 合并顺序变化 → oracle 得到 3 个簇，spclust 得到 4 个
 ```
 
-更关键的是它会**改变最终分组**：用例 `rand_n10d30s3.csv` 里，截断把 `262.5` 和 `262.0`
-压成了同一个值 `262`，产生并列，合并顺序随之变化，最终 oracle 得到 3 个簇而 spclust 得到 4 个。
+关键点：这不只是显示问题 —— **判据本身**（取全局最大相似度）就在被截断后的值上做。
 
-这不只是显示问题 —— **判据本身**（取全局最大相似度）就在被截断后的值上做。
-修法很直接：把 `sp_unit::sim` 和 `grp_s::sim` 换成 `double`（或 `unsigned int`），
-`MIN_SIM_CLUST` 相应调整。`max`/`min` 两种链接不受影响（它们只比较、不平均）。
+**修法**：`sp_sim::sim` / `sp_unit::sim` / `grp_s::sim` 与相关局部变量、
+`add_grp`/`merge_grp` 的形参全部改成 `double`（`main.h`、`spclust.h`、`spclust.cpp`）；
+`readdb.cpp` 的 `parse_sim` 改用 `strtod`，顺带开始接受小数（如 `87.5`）。
+`max`/`min` 两种链接本来只比较不平均，不受影响。
 
-### 2. 重复 pair 是未定义输入，且 `get_max` 与 `get_unit` 会指向不同单元（`KNOWN`）
+**副作用（正向）**：以前 `if (sim > 0)` 会因为截断把真实存在但很小的平均值变成 0、
+从而丢掉这个候选；现在不会了，所以候选集更贴合定义。
+
+**验证**：修复后 `TRUNC=0`，12 个用例全部转为 `PASS`；
+146 次逐次相似度比对的最大相对误差 `4.3e-13`（纯打印精度）。
+并且把 `TRUNC` 改成了**失败**类别，所以这个 bug 再回来会直接让 `make test` 红。
+
+## 已知问题
+
+以下都是实测/静态分析得出的结论。
+前两项**已由 `make test` 复现**（有对应标记），后面几项只是静态分析。
+
+### 1. 重复 pair 是未定义输入，且 `get_max` 与 `get_unit` 会指向不同单元（`KNOWN`）
 
 同一个 `(obj1, obj2)` 出现多次且 `sim` 不同时，读取端会把**每一条都插入结构**，于是：
 
@@ -208,12 +230,12 @@ unsigned short sim = (sim1 * group1_size + sim2 * group2_size) / (group1_size + 
 明确策略（去重 / 报错 / 取最大）而不是留给聚类内部。
 用例：`tests/cases/07_duplicate_edge.csv`、`19_duplicate_order.csv`。
 
-### 3. 自环（`obj1 == obj2`）会破坏结构前提，读取端已丢弃
+### 2. 自环（`obj1 == obj2`）会破坏结构前提，读取端已丢弃
 
 `add_grp` 的所有逻辑都建立在 `group1 < group2` 上，自环会让 `group1 == group2`，
 行链和列链互相踩踏。当前的 `readdb.cpp` 会打印警告并跳过，这是**必要**的，不是可选项。
 
-### 4. `max`/`min`（`LINKAGE_MTD` = 1/2）不是标准链接，且 `1` 会破坏稀疏性
+### 3. `max`/`min`（`LINKAGE_MTD` = 1/2）不是标准链接，且 `1` 会破坏稀疏性
 
 `1`（注释写 complete）取 `max`，按距离语义的标准术语是**单链接**；
 `2`（注释写 single）取 `min` 且要求两边都存在，是**全链接**的一个变体。
@@ -224,12 +246,12 @@ unsigned short sim = (sim1 * group1_size + sim2 * group2_size) / (group1_size + 
 （哪怕值是 0），反复合并后矩阵会趋近稠密，内存和时间退化到 O(n²)。
 `0` 和 `2` 都有 `if (sim > 0)` 保护，`1` 没有。
 
-### 5. `LINKAGE_MTD=2` 时 `grp[].sim` 恒为 0
+### 4. `LINKAGE_MTD=2` 时 `grp[].sim` 恒为 0
 
 单元素组的 `sim` 初值是 0，而 `min(min(...), max_sim)` 一旦碰到 0 就永远是 0。
 只影响输出的紧致度报告，不影响合并顺序。
 
-### 6. “缺失边 = 0”这个语义本身会稀释簇间相似度
+### 5. “缺失边 = 0”这个语义本身会稀释簇间相似度
 
 不是 bug，但值得写进文档：平均链接的分母是全部 `|A|·|B|` 对，所以簇越大，越容易被“稀释”。
 用例 `05_chain_bridge.csv` 就是实例：`a3-b1 = 58` 是两组之间唯一的高于阈值的边，
@@ -238,7 +260,7 @@ unsigned short sim = (sim1 * group1_size + sim2 * group2_size) / (group1_size + 
 而是这种建模方式的固有性质；如果你的簇形状应该由连通性（而不是平均数）决定，
 要在归一化上做选择（比如分母改成实际存在的边数）。
 
-### 7. 以下只是静态分析，测试未区分（因为结果不受影响）
+### 6. 以下只是静态分析，测试未区分（因为结果不受影响）
 
 - 行/列更新集合重叠会产生**重复单元**：若 `group1 < i < group2` 且 `(group1,i)`、`(i,group2)`
   都存在，`i` 会同时落在 `update_dim1` 和 `update_dim2` 里，同一个 `(i, new_grp)` 单元被插两次
@@ -251,6 +273,6 @@ unsigned short sim = (sim1 * group1_size + sim2 * group2_size) / (group1_size + 
 
 ### 验证记录
 
-- `make asan` / `make asan-cases`：在 `sim.csv` 和全部 20 个用例上无内存错误、无 UB。
+- `make asan` / `make asan-cases`：在 `sim.csv` 和全部 21 个用例上无内存错误、无 UB。
 - `make leaks`：`0 leaks for 0 total leaked bytes`（`free_mem()` 释放了全部链表节点）。
-- `make test`：`min_sim` = 20 / 50 / 70 / 200 四个阈值下均 `RESULT: PASS`。
+- `make test`：`min_sim` = 20 / 50 / 70 / 200 四个阈值下均 `RESULT: PASS`，且 `TRUNC=0`。

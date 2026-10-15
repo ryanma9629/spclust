@@ -11,7 +11,7 @@ extern vector<sp_sim> sims;
 extern vector<grp_s> grp;
 
 //将一个(group1, group2, sim)的节点加入结构，每次加入所在链表的头位置
-sp_unit* add_grp(size_t group1, size_t group2, unsigned short sim) {
+sp_unit* add_grp(size_t group1, size_t group2, double sim) {
 	//始终保证group1小于group2
 	if (group1 > group2)
 		swap(group1, group2);
@@ -62,7 +62,7 @@ sp_unit* add_grp(size_t group1, size_t group2, unsigned short sim) {
 
 //获取全局结构中值最大的节点
 sp_unit* get_max(void) {
-	unsigned short max = 0;
+	double max = 0;
 	sp_unit* unit = NULL;
 	//沿着”左向量“遍历每一行链表，每行最大值节点的指针已经记录在max中
 	for (size_t i = 0; i < vec_dim1.size(); i++) {
@@ -125,7 +125,7 @@ size_t init_grp(void) {
 }
 
 //将group1和group2两组聚合，形成新组grp_k，更新其它组到grp_k的相似度
-size_t merge_grp(size_t group1, size_t group2, unsigned short max_sim) {
+size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 	//“左向量”的长度，由于把两个组合并过程中该向量长度会改变，用dim1_size记录合并前的长度，不能用vec_dim1.size()
 	size_t dim1_size = vec_dim1.size();
 	//"顶向量“的长度，由于把两个组合并过程中该向量长度会改变，用dim2_size记录合并前的长度，不能用vec_dim2.size()
@@ -186,14 +186,14 @@ size_t merge_grp(size_t group1, size_t group2, unsigned short max_sim) {
 		if (update_dim1[i]) {
 			//获得(i, group1, sim)这个节点的相似度，节点有可能不存在
 			unit = get_unit(i, group1);
-			unsigned short sim1 = (NULL != unit) ? unit->sim : 0;
+			double sim1 = (NULL != unit) ? unit->sim : 0;
 			//获得(i, group2, sim)这个节点的相似度，节点有可能不存在
 			unit = get_unit(i, group2);
-			unsigned short sim2 = (NULL != unit) ? unit->sim : 0;
+			double sim2 = (NULL != unit) ? unit->sim : 0;
 
 			//Average Linkage
 			if (0 == LINKAGE_MTD) {
-				unsigned short sim = (sim1 * group1_size + sim2 * group2_size) / 
+				double sim = (sim1 * group1_size + sim2 * group2_size) / 
 					(group1_size + group2_size);
 				if (sim > 0)
 					add_grp(i, grp_size, sim);
@@ -211,11 +211,11 @@ size_t merge_grp(size_t group1, size_t group2, unsigned short max_sim) {
 	for (size_t i = 0; i < dim2_size; i++) {
 		if (update_dim2[i]) {
 			unit = get_unit(i, group1);
-			unsigned short sim1 = (NULL != unit) ? unit->sim : 0;
+			double sim1 = (NULL != unit) ? unit->sim : 0;
 			unit = get_unit(i, group2);
-			unsigned short sim2 = (NULL != unit) ? unit->sim : 0;
+			double sim2 = (NULL != unit) ? unit->sim : 0;
 			if (0 == LINKAGE_MTD) {
-				unsigned short sim = (sim1 * group1_size + sim2 * group2_size) / 
+				double sim = (sim1 * group1_size + sim2 * group2_size) / 
 					(group1_size + group2_size);
 				if (sim > 0)
 					add_grp(i, grp_size, sim);
@@ -373,7 +373,7 @@ size_t merge_grp(size_t group1, size_t group2, unsigned short max_sim) {
 	for (size_t i = 0; i < dim1_size; i++) {
 		if (update_max[i]) {
 			sp_unit* unit = vec_dim1[i].head;
-			unsigned short max = 0;
+			double max = 0;
 			//从左到右遍历，找到最大值
 			if (NULL == unit)
 				vec_dim1[i].max = NULL;
@@ -434,7 +434,7 @@ void clust_grp(void) {
 	//如果没有全部合并成1组，或剩余最大相似度小于阈值 MIN_SIM_CLUST
 	while (grp_size > 1) {
 		sp_unit* unit = get_max();
-		unsigned short max_sim = (NULL != unit) ? unit->sim : 0;
+		double max_sim = (NULL != unit) ? unit->sim : 0;
 		if (NULL == unit || max_sim < MIN_SIM_CLUST)
 			break;
 		else {
@@ -447,7 +447,8 @@ void clust_grp(void) {
 			size_t new_grp = merge_grp(group1, group2, max_sim) - 1;
 			if (DEBUG >= 2)
 				cout << "\tGroup " << group1 << " and group " << group2 << 
-					" are merged into group " << new_grp << " (sim=" << max_sim << ")." << endl;
+					" are merged into group " << new_grp << " (sim=" << setprecision(12)
+					<< max_sim << ")." << endl;
 		}
 	}
 	//聚类结束，释放结构占用内存
