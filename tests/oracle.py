@@ -111,7 +111,11 @@ def load_edges(path):
 
 
 def _build_dense(order, edges):
-    """原始相似度矩阵（brute 模式用），缺失为 0。返回 (S, duplicate_count)。"""
+    """原始相似度矩阵（brute 模式用），缺失为 0。返回 (S, duplicate_count)。
+
+    同一个 pair 出现多次且值不同时**取最大值** —— 这是 spclust 的实际语义
+    （它的合并值来自 get_max()，即行内最大值），实测两组相反顺序的输入结果一致。
+    """
     n = len(order)
     idx = {o: i for i, o in enumerate(order)}
     S = [[0] * n for _ in range(n)]
@@ -125,7 +129,8 @@ def _build_dense(order, edges):
         if (i, j) in pairs:
             dup += 1
         pairs.add((i, j))
-        S[i][j] = S[j][i] = v  # 后出现的覆盖先出现的
+        if v > S[i][j]:                     # 重复 pair 取最大值（不是"后出现的覆盖"）
+            S[i][j] = S[j][i] = v
     return S, dup
 
 

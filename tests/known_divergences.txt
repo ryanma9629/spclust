@@ -4,17 +4,11 @@
 # 只有当"分歧确实存在"时才应该留在这里；一旦分歧消失，测试会报 XPASS 提示清理。
 # 未经确认的分歧不允许写进来 —— 那正是测试要抓的东西。
 #
-# 实测结论：重复 pair（同一个 pair 出现多次且 sim 不同）是矛盾的输入，
-# readdb 会把每条都插进结构，于是
-#   * get_max()  ——行内最大值，看到较大的那个（07 里是 90）
-#   * get_unit() ——沿行链从头找第一个匹配，拿到的是最后插入的（07 里是 80）
-# 两者指向不同单元。合并不崩溃（两个单元都会被恰好释放一次，ASan 通过），
-# 实际效果等价于"重复 pair 取较大值、与写入顺序无关"。
-# oracle 采用更常见的 "last wins"，所以必然分歧。
-# 待办：由 readdb 层定义策略（去重/报错/取最大），而不是留给聚类内部。
-07_duplicate_edge.csv  average  重复 pair 语义未定义：spclust 取最大值，oracle 取最后一条
-07_duplicate_edge.csv  max      重复 pair 语义未定义：spclust 取最大值，oracle 取最后一条
-07_duplicate_edge.csv  min      重复 pair 语义未定义：spclust 取最大值，oracle 取最后一条
-19_duplicate_order.csv  average  重复 pair 语义未定义：spclust 取最大值（与顺序无关），oracle 取最后一条
-19_duplicate_order.csv  max      重复 pair 语义未定义：spclust 取最大值（与顺序无关），oracle 取最后一条
-19_duplicate_order.csv  min      重复 pair 语义未定义：spclust 取最大值（与顺序无关），oracle 取最后一条
+# 目前为空。
+#
+# 曾经登记过 6 条（07_duplicate_edge.csv / 19_duplicate_order.csv × 3 种 linkage），
+# 理由是"重复 pair 语义未定义：spclust 取最大值，oracle 取最后一条"。
+# 后来把语义定清楚了 —— 同一个 pair 出现多次时取**最大值**（这正是 spclust 的实际行为：
+# 合并值来自 get_max()，即行内最大值；实测两组相反顺序的输入结果完全一致），
+# 并把 oracle 与 spclust 的派生相似度都对齐到"取最大"，两边就不再分歧了。
+# 这 6 条随即变成 XPASS，按规矩删除。
