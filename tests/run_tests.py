@@ -126,12 +126,14 @@ def collect_cases(args):
     return cases
 
 
-def run_spclust(bin_path, case_path, cut):
+def run_spclust(bin_path, case_path, cut, linkage=None):
     proc = subprocess.run(
         # --floor 0：算完整树，这样能与 oracle 的完整树逐次比对（比只比阈值以上更强）。
         # --cut：本次要验证的切树位置。
         # --matrix：走公开的 linkage 矩阵接口拿逐次合并（不再解析 DEBUG 日志）
-        [str(bin_path), str(case_path), "--floor", "0", "--cut", str(cut), "--matrix"],
+        # --linkage：链接方式现在是运行时的，所以一个二进制就能覆盖三种（以前要编三个）
+        [str(bin_path), str(case_path), "--floor", "0", "--cut", str(cut), "--matrix"]
+        + ([] if linkage is None else ["--linkage", str(linkage)]),
         cwd=str(REPO), capture_output=True, text=True,
     )
     if proc.returncode != 0:
@@ -234,8 +236,8 @@ def compare(o, got, order, o_cut):
 
 def main(argv=None):
     ap = argparse.ArgumentParser(description="spclust 差分测试")
-    ap.add_argument("--bin-prefix", default="./spclust-linkage-",
-                    help="按 LINKAGE_MTD 编号的二进制前缀，默认 ./spclust-linkage-")
+    ap.add_argument("--bin", default="./spclust",
+                    help="被测二进制，默认 ./spclust（链接方式用 --linkage 运行时选）")
     ap.add_argument("--min-sim", type=int, default=50,
                     help="必须与二进制编译时的 MIN_SIM_CLUST 一致")
     ap.add_argument("--only", choices=sorted(LINKAGE_BY_MTD.values()),
@@ -249,10 +251,9 @@ def main(argv=None):
     linkages = [args.only] if args.only else sorted(LINKAGE_BY_MTD.values())
 
     # 检查二进制
-    for lk in linkages:
-        p = REPO / f"{args.bin_prefix}{MTD_BY_LINKAGE[lk]}"
-        if not p.exists():
-            raise SystemExit(f"找不到 {p}，先跑 `make linkages`（或直接用 `make test`）")
+    binp = REPO / args.bin
+    if not binp.exists():
+        raise SystemExit(f"找不到 {binp}，先跑 `make`（或直接用 `make test`）")
 
     known = load_known_divergences()
     cases = collect_cases(args)
@@ -315,8 +316,8 @@ def main(argv=None):
             o_trunc_cut = oracle.cut(o_trunc, args.min_sim)
 
             if outcome is None:
-                got = oracle.parse_spclust(run_spclust(REPO / f"{args.bin_prefix}{MTD_BY_LINKAGE[lk]}",
-                                                       case_path, args.min_sim), order)
+                got = oracle.parse_spclust(run_spclust(binp, case_path, args.min_sim,
+                                                       MTD_BY_LINKAGE[lk]), order)
                 outcome, detail = compare(o, got, order, o_cut)
 
                 if outcome != "PASS" and o_trunc["merges"] != o["merges"] \

@@ -26,7 +26,8 @@ ctest --test-dir build --output-on-failure      # 差分测试 + CLI 契约测�
 make            # 构建 ./spclust
 make lib        # 只把库编成 libspclust.a
 make run        # 跑 sim.csv
-make test       # 差分测试 + CLI 测试
+make test       # 差分测试 + 切树属性测试 + CLI 测试
+make test-cut   # 只跑切树属性测试
 make bench      # 性能回归护栏（固定输入 + 记录的基线）
 make check      # 三种 linkage 各跑一遍做对比
 make asan       # AddressSanitizer + UBSan
@@ -45,22 +46,35 @@ target_link_libraries(your_target PRIVATE spclust::spclust)
 ```cpp
 #include <spclust/hac.h>
 
-spclust::reserve(n_objects, n_edges);          // 可选：预留容量
-for (auto& e : edges)
-    spclust::add_edge(e.a, e.b, e.similarity); // id 必须是稠密的 0..n-1
-spclust::build(0.0);                           // 0 = 算完整棵树
+spclust::HAC hac(spclust::Linkage::Average);   // 链接方式是**运行时**参数
 
-for (const spclust::Merge& m : spclust::tree())
+hac.reserve(n_objects, n_edges);               // 可选：预留容量
+for (auto& e : edges)
+    hac.add_edge(e.a, e.b, e.similarity);      // id 必须是稠密的 0..n-1
+
+hac.build(0.0);                                // 0 = 算完整棵树
+
+for (const spclust::Merge& m : hac.tree())
     ...                                        // 就是 linkage 矩阵：left right similarity size
 
-spclust::Cut c = spclust::cut(50.0);            // 把树切在相似度 50 处（不需要重新聚类）
+// 三种切法，任意切换，都不需要重新聚类
+spclust::Cut c = hac.cut(50.0);                // 切在相似度 50 处
+spclust::Cut k = hac.cut_n_clusters(12);       // 要正好 12 个簇
+spclust::Cut s = hac.cut_min_size(5);          // 合并到没有小于 5 的簇为止
+
 for (const auto& members : c.members)
-    ...                                        // 每个簇的对象 id
-spclust::reset();                              // 同一进程里接着跑下一次
+    ...                                        // 每个簇的对象 id（Cut 里还有 cohesion）
+
+hac.reset();                                   // 同一个对象接着跑下一次
+
+// 一个进程里可以有任意多个独立聚类，互不影响，也不需要加锁。
+// （只要别让两个线程用**同一个** HAC 对象。）
+spclust::HAC other(spclust::Linkage::MaxSimilarity);
 ```
 
 **用之前请读 `include/spclust/hac.h` 顶部的契约**（缺失边视为 0、id 必须稠密、
-重复 pair 取最大值、自环抛异常、并列时合并顺序不作保证、以及"目前一个进程一份状态"）。
+重复 pair 取最大值、自环抛异常、并列时合并顺序不作保证、一个对象持有独立状态且
+不与读接口并发安全）。链接方式对簇形的影响见 [docs/design.md](docs/design.md#链接方式)。
 
 ## 输入格式
 
@@ -92,6 +106,9 @@ Unclustered (4): d1 d2 e1 e2
 
 ```
 spclust_cli data.csv --cut 86         # 切在 86（不重新聚类）
+spclust_cli data.csv --n-clusters 12  # 要正好 12 个簇（需要完整树）
+spclust_cli data.csv --min-size 5     # 合并到没有小于 5 的簇为止（需要完整树）
+spclust_cli data.csv --linkage 1      # 链接方式：0/average 1/max|single 2/min|min-nonzero
 spclust_cli data.csv --tree           # 树状图（--tree-depth N 控制深度，0 = 不限）
 spclust_cli data.csv --matrix         # linkage 矩阵：left right height size
 spclust_cli data.csv --floor 0        # 把树算到最底部（完整树；默认 = cut，代价更低）
@@ -116,6 +133,10 @@ spclust_cli data.csv --floor 0        # 把树算到最底部（完整树；默�
 - 差分测试：独立参考实现（不含 Lance-Williams 递推）逐次合并比对 + 22 个手写边界用例；
   另有 900 次多阈值切树交叉验证。当前 `PASS=90 WARN=12 KNOWN=0 FAIL=0`
   （WARN 是并列导致的合并顺序不确定，两边都合法）。
+- 切树属性测试（`tests/test_cut.cpp`，库级）：期望值不是把并查集再写一遍，而是
+  **从合并树自底向上收集叶子集合**算出——另一条代码路径。覆盖三种链接 × 21 个随机图 ×
+  并列阈值 / 正好 k 个簇 / 最小簇大小 / 紧致度归属 / 单调性，外加多实例与 reset 复用。
+  当前 `PASS=18281 FAIL=0`。
 - ASan/UBSan 干净、0 泄漏；节点池手工毒化，所以"读已释放节点"仍能被 ASan 抓到。
 - 累计性能（对比最开始的基线，详见 [docs/performance.md](docs/performance.md)）：
   800k 边 **21.9x**、2M 边 **51.1x**，峰值内存 **−55~61%**；单链接 **300x**。

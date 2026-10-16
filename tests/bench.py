@@ -63,7 +63,7 @@ PLAN = [
     ("bench_mid",    "spclust",   ["--floor", "50"]),
     ("bench_large",  "spclust",   ["--floor", "50"]),
     ("bench_lowval", "spclust",   ["--floor", "50"]),
-    ("bench_single", "linkage1",  ["--floor", "50"]),   # 单链接走 Kruskal 路径
+    ("bench_single", "linkage1",  ["--floor", "50", "--linkage", "1"]),  # 单链接走 Kruskal
 ]
 
 
@@ -125,8 +125,6 @@ def load_baseline(path):
 def main():
     ap = argparse.ArgumentParser(description="spclust 性能回归护栏")
     ap.add_argument("--bin", default="./spclust", help="默认二进制")
-    ap.add_argument("--bin-linkage1", default="./spclust-linkage-50-1",
-                    help="单链接（Kruskal）用的二进制")
     ap.add_argument("--baseline", default=str(BASELINE))
     ap.add_argument("--update", action="store_true", help="重新记录基线")
     ap.add_argument("--strict", action="store_true", help="超出容差即失败（默认只警告）")
@@ -139,10 +137,11 @@ def main():
     def absbin(p):
         p = Path(p)
         return p if p.is_absolute() else (Path.cwd() / p).resolve()
-    bins = {"spclust": absbin(args.bin), "linkage1": absbin(args.bin_linkage1)}
+    # 链接方式现在是运行时的，所以三种链接共用同一个二进制（PLAN 第二列只是基线文件里的标签）。
+    bins = {"spclust": absbin(args.bin), "linkage1": absbin(args.bin)}
     for name, b in bins.items():
         if not b.exists():
-            raise SystemExit(f"找不到 {b}；先 `make linkages`（或直接用 `make bench`）")
+            raise SystemExit(f"找不到 {b}；先 `make`（或直接用 `make bench`）")
 
     old_fp, old = load_baseline(baseline_path)
     fp = machine_fingerprint()

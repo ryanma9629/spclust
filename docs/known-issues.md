@@ -391,7 +391,7 @@ O(k²) —— 在 k≈38 时比 introsort 慢 7 倍，整体慢 21%。这个数�
 `add_grp` 的所有逻辑都建立在 `group1 < group2` 上，自环会让 `group1 == group2`，
 行链和列链互相踩踏。当前的 `readdb.cpp` 会打印警告并跳过，这是**必要**的，不是可选项。
 
-### 3. `max`/`min`（`LINKAGE_MTD` = 1/2）不是标准链接 —— 但都已处理好
+### 3. `max`/`min`（现在的 `Linkage::MaxSimilarity` / `MinNonzero`）不是标准链接 —— 但都已处理好
 
 `1`（注释写 complete）取 `max`，按距离语义的标准术语是**单链接**；
 `2`（注释写 single）取 `min` 且要求两边都存在，是**全链接**的一个变体。
@@ -414,7 +414,7 @@ O(k²) —— 在 k≈38 时比 introsort 慢 7 倍，整体慢 21%。这个数�
 所以不改变任何结果），但**它不是性能问题的原因** —— 实测那个保护只去掉
 52,147 / 93,418,345 = 0.06% 的单元。我一开始把 8 倍慢归因给它，是错的。
 
-### 4. `LINKAGE_MTD=2` 时 `grp[].sim` 恒为 0
+### 4. `min`（现在的 `Linkage::MinNonzero`）时 `grp[].sim` 恒为 0
 
 单元素组的 `sim` 初值是 0，而 `min(min(...), max_sim)` 一旦碰到 0 就永远是 0。
 只影响输出的紧致度报告，不影响合并顺序。
@@ -431,8 +431,10 @@ O(k²) —— 在 k≈38 时比 introsort 慢 7 倍，整体慢 21%。这个数�
 ### 6. 以下只是静态分析，测试未区分（因为结果不受影响）
 
 - `grp` / `vec_dim1` / `vec_dim2` 单调增长到约 2n-1，被合并的槽位清空但不回收。
-- `MIN_ACCT_NUM`、`MIN_SIM_WG` 定义了但从未使用。
-- `using namespace std;` 放在头文件里，`grp` 靠全局变量 + `extern` 串起来。
+- `MIN_ACCT_NUM`、`MIN_SIM_WG` 定义了但从未使用。→ 已删。
+- `using namespace std;` 放在头文件里，`grp` 靠全局变量 + `extern` 串起来。→ 已改：
+  头文件不再 `using namespace std`，34 个文件静态变量全部收进 `spclust::detail::HACImpl`
+  （一个对象一份状态）。详见 [design](design.md#状态与实例)。
 
 ### 验证记录
 

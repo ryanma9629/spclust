@@ -67,6 +67,104 @@ def oracle_cut(case, cut, linkage="average"):
     return frozenset(frozenset(order[i] for i in m) for m in oracle.cut(res, cut))
 
 
+def t_linkage_runtime(bin_path):
+    """链接方式现在是运行时选项：--linkage 0/1/2 必须真的换算法，
+    而且同一个二进制三种都要能跑（以前是三个二进制）。"""
+    bad = []
+    case = CASES[0]
+    seen = {}
+    for name, m in (("average", "0"), ("max", "1"), ("min", "2")):
+        r = run(bin_path, [case, "--linkage", m, "--matrix"])
+        if r.returncode != 0 and r.returncode != 2:
+            bad.append(f"--linkage {m} 退出码 {r.returncode}")
+            continue
+        seen[name] = parse_matrix(r.stdout)
+        # 名字也必须认
+        r2 = run(bin_path, [case, "--linkage", name, "--matrix"])
+        if parse_matrix(r2.stdout) != seen[name]:
+            bad.append(f"--linkage {name} 与 --linkage {m} 结果不同")
+    # 在"确实会分叉"的用例上（10_dense_6），三种链接应当给出至少两种不同结果
+    dense = [c for c in CASES if "10_dense_6" in c]
+    if dense:
+        outs = set()
+        for m in ("0", "1", "2"):
+            outs.add(tuple(parse_matrix(run(bin_path, [dense[0], "--linkage", m,
+                                                       "--matrix"]).stdout)))
+        if len(outs) < 2:
+            bad.append("dense 用例上三种 linkage 给出了完全相同的结果（可疑）")
+    r = run(bin_path, [case, "--linkage", "7"])
+    if r.returncode != 2:
+        bad.append(f"未知 linkage: 退出码 {r.returncode}，期望 2")
+    return (not bad), "; ".join(bad)
+
+
+def t_n_clusters(bin_path):
+    """--n-clusters K：树够深时必须正好 K 个簇，且每个对象恰好出现一次。
+    精确的"切在前 n-K 次合并"语义由库级属性测试 tests/test_cut.cpp 覆盖（含并列）。"""
+    bad = []
+    for case in CASES:
+        order, edges, _ = oracle.load_edges(case)
+        n = len(order)
+        # 树能提供的簇数下限 = n - 合并次数
+        res = oracle.hac(order, edges, "average", 0, "brute" if n <= 24 else "fast")
+        deepest = n - len(res["merges"])
+        for k in (1, 2, 3, n):
+            if k > n:
+                continue
+            r = run(bin_path, [case, "--n-clusters", str(k)])
+            if r.returncode != 0:
+                bad.append(f"{Path(case).name} --n-clusters {k}: 退出码 {r.returncode}")
+                continue
+            got = parse_flat(r.stdout)
+            members = [x for g in got for x in g]
+            if sorted(members) != sorted(order):
+                bad.append(f"{Path(case).name} --n-clusters {k}: 成员不是全部对象各一次")
+            # 树够深（k >= n - 合并次数）时，簇数必须正好是 k
+            if k >= deepest and len(got) != k:
+                bad.append(f"{Path(case).name} --n-clusters {k}: 得到 {len(got)} 个簇")
+    # k = n 必须全部分散
+    r = run(bin_path, [CASES[0], "--n-clusters", "999"])
+    if parse_flat(r.stdout) != frozenset(frozenset([o]) for o in
+                                         oracle.load_edges(CASES[0])[0]):
+        bad.append("--n-clusters 大于对象数时应全部分散")
+    return (not bad), "; ".join(bad[:3])
+
+
+def components(bin_path, case):
+    """连通分量：把树合并到底（--cut 0）得到的就是分量划分（含单元素）。"""
+    r = run(bin_path, [case, "--floor", "0", "--cut", "0"])
+    return parse_flat(r.stdout)
+
+
+def t_min_size(bin_path):
+    """--min-size M：结果里不应有小于 M 的簇 —— 除非它所在的连通分量本身就小于 M
+    （min-nonzero 语义下没有边的两簇永不合并，所以那种情况下条件不可达）。"""
+    bad = []
+    for case in CASES:
+        for m in (2, 3):
+            r = run(bin_path, [case, "--min-size", str(m)])
+            if r.returncode != 0:
+                bad.append(f"{Path(case).name} --min-size {m}: 退出码 {r.returncode}")
+                continue
+            got = parse_flat(r.stdout)
+            comps = components(bin_path, case)
+            comp_of = {o: c for c in comps for o in c}
+            for grp in got:
+                if len(grp) >= m:
+                    continue
+                # 小于 m 的簇：必须正好是它所属的整个连通分量（合不动了）
+                comp = comp_of[next(iter(grp))]
+                if grp != comp:
+                    bad.append(f"{Path(case).name} --min-size {m}: size={len(grp)} 的簇"
+                               f"不是完整分量（分量 {len(comp)}）")
+    # min-size 1 与 --cut 极高（全分散）等价
+    r1 = run(bin_path, [CASES[0], "--min-size", "1"])
+    r2 = run(bin_path, [CASES[0], "--cut", "1000000"])
+    if parse_flat(r1.stdout) != parse_flat(r2.stdout):
+        bad.append("--min-size 1 应当不合并任何东西")
+    return (not bad), "; ".join(bad[:3])
+
+
 # ---------------------------------------------------------------------------
 # 各项检查：返回 (ok, detail)
 # ---------------------------------------------------------------------------
@@ -231,6 +329,9 @@ def t_duplicate_order_independent(bin_path):
 
 
 TESTS = [
+    ("--linkage 运行时选择", t_linkage_runtime),
+    ("--n-clusters", t_n_clusters),
+    ("--min-size", t_min_size),
     ("退出码与错误路径", t_exit_codes),
     ("--cut 与 oracle 切树一致", t_cut_matches_oracle),
     ("切树 == 提前停止(单调性)", t_cut_equals_early_stop),

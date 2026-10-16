@@ -26,11 +26,43 @@ using spclust::Merge;
 
 namespace {
 
-//切树的相似度阈值：默认取编译期常量 MIN_SIM_CLUST，可用 --cut 覆盖。
+//本程序只跑一个聚类，所以这里放一个指向它的全局指针，供下面几个打印函数用。
+//（库那边是一对象一份状态，不再有全局量；这里只是 CLI 自己图个方便。）
+spclust::HAC* g_hac = NULL;
+
+
+//切法。三种互斥，命令行里后给的那个生效：
+//   --cut <X>        切在相似度 X 处（默认，X 取编译期 MIN_SIM_CLUST）
+//   --n-clusters <K> 要正好 K 个簇
+//   --min-size <M>   合并到没有小于 M 的簇为止
 //
 //合并树本身是完整算出来的（spclust::build），所以这个阈值只决定"从哪里切开"，
 //换一个阈值不需要重新聚类。
+enum CutMode { CUT_SIM, CUT_N, CUT_SIZE };
+CutMode cut_mode = CUT_SIM;
 double cut_sim = (double)MIN_SIM_CLUST;
+size_t cut_n_clusters = 0;
+size_t cut_min_size = 0;
+
+//按当前模式切树
+Cut do_cut(void) {
+	switch (cut_mode) {
+	case CUT_N:    return g_hac->cut_n_clusters(cut_n_clusters);
+	case CUT_SIZE: return g_hac->cut_min_size(cut_min_size);
+	default:       return g_hac->cut(cut_sim);
+	}
+}
+
+//一句话描述当前切法（用于提示信息）
+string cut_desc(void) {
+	char buf[128];
+	switch (cut_mode) {
+	case CUT_N:    snprintf(buf, sizeof(buf), "n-clusters=%zu", cut_n_clusters); break;
+	case CUT_SIZE: snprintf(buf, sizeof(buf), "min-size=%zu", cut_min_size); break;
+	default:       snprintf(buf, sizeof(buf), "cut=%g", cut_sim); break;
+	}
+	return string(buf);
+}
 //树算到多低。默认 = 切树阈值（于是成本与"直接在阈值处停下"完全一样）；
 //用 --floor 显式指定（0 = 完整树）或者把 --cut 定得比默认更低时，会自动跟着降。
 bool floor_given = false;
@@ -38,6 +70,10 @@ double tree_floor = (double)MIN_SIM_CLUST;
 bool show_tree = false;
 int tree_depth = 6;          // --tree 的深度上限；0 表示不限
 bool show_matrix = false;
+
+//链接方式。以前这是编译期常量（LINKAGE_MTD），要换就得重编译；现在库里是
+//构造参数，所以一个二进制就能跑三种，也能用 --linkage 在命令行选。
+spclust::Linkage linkage = spclust::Linkage::Average;
 
 //对象 id -> 名字。库只认 id；名字映射是 CLI 的事。
 vector<string> names;
@@ -57,7 +93,7 @@ void edge_to_library(string obj1, string obj2, double sim) {
 	if (r2.second)
 		names.push_back(r2.first->first);
 	id2 = r2.first->second;
-	spclust::add_edge(id1, id2, sim);
+	g_hac->add_edge(id1, id2, sim);
 }
 
 // ---------------------------------------------------------------------------
@@ -69,7 +105,7 @@ void print_result(void) {
 	//spclust.cpp 的 DEBUG=2 日志把 cout 的精度调到了 12，这里显式改回 6 位有效数字
 	cout << setprecision(6);
 
-	Cut c = spclust::cut(cut_sim);
+	Cut c = do_cut();
 
 	//只列出 size>=2 的簇，按"簇大小降序、紧致度降序"
 	vector<size_t> clusters;
@@ -82,10 +118,9 @@ void print_result(void) {
 		return c.cohesion[a] > c.cohesion[b];
 	});
 
-	cout << "Objects: " << spclust::num_objects() << ", groups: " << clusters.size() << endl;
+	cout << "Objects: " << g_hac->num_objects() << ", groups: " << clusters.size() << endl;
 	if (clusters.empty()) {
-		cout << "No group reached 2 objects (all remaining similarities below cut="
-			<< cut_sim << ")." << endl;
+		cout << "No group reached 2 objects (" << cut_desc() << ")." << endl;
 	}
 	for (size_t k = 0; k < clusters.size(); k++) {
 		const vector<uint32_t>& m = c.members[clusters[k]];
@@ -112,14 +147,14 @@ void print_result(void) {
 
 //树状图（人类可读）。深度受限，太深的地方折叠成一行，完整数据用 --matrix。
 void print_subtree(size_t node, int depth, int max_depth) {
-	const size_t n = spclust::num_objects();
+	const size_t n = g_hac->num_objects();
 	for (int i = 0; i < depth; i++)
 		cout << "  ";
 	if (node < n) {
 		cout << "- " << names[node] << endl;
 		return;
 	}
-	const Merge& r = spclust::tree()[node - n];
+	const Merge& r = g_hac->tree()[node - n];
 	cout << "+ merged at sim=" << r.similarity << " (size=" << r.size << ")" << endl;
 	if (max_depth > 0 && depth + 1 > max_depth) {
 		for (int i = 0; i <= depth; i++)
@@ -132,8 +167,8 @@ void print_subtree(size_t node, int depth, int max_depth) {
 }
 
 void print_tree(void) {
-	const vector<Merge>& tr = spclust::tree();
-	const size_t n = spclust::num_objects();
+	const vector<Merge>& tr = g_hac->tree();
+	const size_t n = g_hac->num_objects();
 	//根 = 没有当过任何一次合并的子节点的节点
 	vector<char> is_child(n + tr.size(), 0);
 	for (size_t i = 0; i < tr.size(); i++) {
@@ -159,8 +194,8 @@ void print_tree(void) {
 //（0..n-1 是对象，n+i 是第 i 次合并）。注意 height 这里是**相似度**（越大越先合并），
 //scipy 用的是距离。
 void print_matrix(void) {
-	const vector<Merge>& tr = spclust::tree();
-	const size_t n = spclust::num_objects();
+	const vector<Merge>& tr = g_hac->tree();
+	const size_t n = g_hac->num_objects();
 	cout << "# linkage matrix: left right height size" << endl;
 	cout << "# 节点 id：0.." << (n ? n - 1 : 0) << " 是对象（按输入中首次出现的顺序），"
 		<< n << "+i 是第 i 次合并。height 是**相似度**（越大越先合并），不是距离。" << endl;
@@ -176,9 +211,12 @@ void usage(const char* prog) {
 	     << "  similarity.csv   输入边表；省略或给 - 表示从标准输入读" << endl
 	     << "  --cut <X>        把合并树切在相似度 X 处（默认 " << MIN_SIM_CLUST
 	     << "，即编译期 MIN_SIM_CLUST）" << endl
+	     << "  --n-clusters <K> 要正好 K 个簇（需要完整树，见下）" << endl
+	     << "  --min-size <M>   合并到没有小于 M 的簇为止（需要完整树，见下）" << endl
 	     << "  --floor <X>      树算到多低（默认 = cut；0 = 完整树，代价是慢 2~4 倍）" << endl
 	     << "  --tree           打印树状图" << endl
 	     << "  --tree-depth <N> 树状图的深度上限（默认 " << 6 << "，0 = 不限；隐含 --tree）" << endl
+	     << "  --linkage <M>    链接方式：0/average（默认）、1/max|single、2/min|min-nonzero" << endl
 	     << "  --matrix         打印 linkage 矩阵（left right height size）" << endl
 	     << "  -h, --help       显示这个" << endl;
 }
@@ -195,6 +233,20 @@ int main(int argc, char* argv[]) {
 				return 2;
 			}
 			cut_sim = atof(argv[i]);
+		} else if ("--n-clusters" == a) {
+			if (++i >= argc) {
+				cerr << "--n-clusters 需要一个数值" << endl;
+				return 2;
+			}
+			cut_n_clusters = (size_t)strtoul(argv[i], NULL, 10);
+			cut_mode = CUT_N;
+		} else if ("--min-size" == a) {
+			if (++i >= argc) {
+				cerr << "--min-size 需要一个数值" << endl;
+				return 2;
+			}
+			cut_min_size = (size_t)strtoul(argv[i], NULL, 10);
+			cut_mode = CUT_SIZE;
 		} else if ("--floor" == a) {
 			if (++i >= argc) {
 				cerr << "--floor 需要一个数值" << endl;
@@ -211,6 +263,23 @@ int main(int argc, char* argv[]) {
 			}
 			tree_depth = atoi(argv[i]);
 			show_tree = true;        // 给了深度显然是想看树
+
+		} else if ("--linkage" == a) {
+			if (++i >= argc) {
+				cerr << "--linkage 需要一个值" << endl;
+				return 2;
+			}
+			const string v = argv[i];
+			if ("0" == v || "average" == v)
+				linkage = spclust::Linkage::Average;
+			else if ("1" == v || "max" == v || "single" == v || "max-similarity" == v)
+				linkage = spclust::Linkage::MaxSimilarity;
+			else if ("2" == v || "min" == v || "min-nonzero" == v)
+				linkage = spclust::Linkage::MinNonzero;
+			else {
+				cerr << "未知的 linkage: " << v << "（用 0/average、1/max、2/min）" << endl;
+				return 2;
+			}
 
 		} else if ("--matrix" == a) {
 			show_matrix = true;
@@ -233,6 +302,10 @@ int main(int argc, char* argv[]) {
 		}
 	}
 
+	//一个进程一份状态这件事已经结束了：库那边是对象，这里自己造一个。
+	spclust::HAC hac(linkage);
+	g_hac = &hac;
+
 	//无参数或 "-" 都表示从标准输入读取。
 	//边一边读一边就进结构了（不缓存整个输入），所以 init 阶段并进了这里。
 	//返回 0 表示失败（原因 readdb 已经写到 stderr）。以前是 readdb 内部直接 exit(1)，
@@ -240,19 +313,26 @@ int main(int argc, char* argv[]) {
 	if (0 == readdb(path, &edge_to_library))
 		return 1;
 
-	if (DEBUG >= 1)
-		cout << "Linkage=" << spclust::linkage_name() << ", cut=" << cut_sim << endl << endl;
-
 	//只有 --cut 比默认更低时才需要把树算得更深：没给 --floor 就自动跟着降，
 	//这样"只想在更低的阈值处切一刀"不需要额外参数，也不会白白多算。
-	if (!floor_given && cut_sim < tree_floor)
-		tree_floor = cut_sim;
+	//按簇数 / 簇大小切则必须算完整树（不知道要合并到多低），代价见 usage。
+	if (!floor_given) {
+		if (CUT_SIM != cut_mode)
+			tree_floor = 0.0;
+		else if (cut_sim < tree_floor)
+			tree_floor = cut_sim;
+	}
+
+	//这里打印的是**生效的** floor（可能在上面刚被调低）
+	if (DEBUG >= 1)
+		cout << "Linkage=" << hac.linkage_name() << ", " << cut_desc()
+			<< ", floor=" << tree_floor << endl << endl;
 
 	//算合并树。计时写在 CLI 这边 —— 库里不打印任何东西。
 	if (DEBUG >= 1)
 		cout << "Clustering..." << endl;
 	clock_t s_time = clock();
-	spclust::build(tree_floor);
+	hac.build(tree_floor);
 	if (DEBUG >= 1)
 		cout << "Done. (" << (double)(clock() - s_time) / CLOCKS_PER_SEC << "s)" << endl << endl;
 

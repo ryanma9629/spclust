@@ -18,16 +18,30 @@ jobs:
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
-      - name: Build (库 + CLI + 三种 linkage 测试二进制)
+      - name: Build (库 + CLI + 测试)
         run: cmake --build build --parallel
 
-      - name: Test (差分测试 + CLI 契约测试)
+      - name: Test (切树属性测试 + 差分测试 + CLI 契约测试)
         run: ctest --test-dir build --output-on-failure
+
+      - name: 链接方式必须是运行时的（一个二进制跑三种，结果必须互不相同）
+        run: |
+          set -e
+          for m in 0 1 2; do
+            ./build/spclust_cli sim.csv --linkage "$m" --matrix > "/tmp/m$m.txt"
+          done
+          if cmp -s /tmp/m0.txt /tmp/m1.txt && cmp -s /tmp/m0.txt /tmp/m2.txt; then
+            echo "三种 linkage 输出完全相同，可疑"; exit 1
+          fi
 
       - name: Sanitizers (ASan/UBSan over the case corpus)
         run: make asan-cases
 
-      - name: 只编库（验证库不依赖 tools/）
+      - name: 只编库（验证库不依赖 tools/，也验证那两个开关真的生效）
         run: |
+          set -e
           cmake -S . -B build-libonly -DSPCLUST_BUILD_TOOLS=OFF -DSPCLUST_BUILD_TESTS=OFF
           cmake --build build-libonly --parallel
+          test -f build-libonly/libspclust.a
+          test ! -e build-libonly/spclust_cli
+          test ! -e build-libonly/cut_property

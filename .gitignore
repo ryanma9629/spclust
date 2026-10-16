@@ -1,11 +1,16 @@
 # 构建产物
-spclust
-spclust-asan
-spclust-linkage-*
-libspclust.a
-hac.o
-build/
-build-*/
+#
+# 注意：这些模式必须用前缀 / 锚定到仓库根！以前写的是裸 `spclust`，
+# 而 .gitignore 里不带斜杠的模式会匹配**任意层级的同名路径**，
+# 于是 include/spclust/ 整个目录被忽略了 —— 公开头文件从来没被提交过。
+/spclust
+/spclust-asan
+/spclust-linkage-*
+/libspclust.a
+/cut_property
+/hac.o
+/build/
+/build-*/
 *.dSYM/
 *.o
 

@@ -2,22 +2,24 @@
 # Copyright (c) 2022-2026 Ryan Ma <pningma@sina.com>
 
 cmake_minimum_required(VERSION 3.16)
-project(spclust VERSION 0.2.0 LANGUAGES CXX
+project(spclust VERSION 0.3.0 LANGUAGES CXX
         DESCRIPTION "基于稀疏相似度矩阵的凝聚型层次聚类")
 
 # ---------------------------------------------------------------------------
 # 选项
 # ---------------------------------------------------------------------------
-# 链接方式目前仍是编译期常量（换它要重新编译本库）。0=average 1=max(单链接) 2=min(nonzero)
-set(SPCLUST_LINKAGE "0" CACHE STRING "linkage: 0=average 1=max 2=min(nonzero)")
-set_property(CACHE SPCLUST_LINKAGE PROPERTY STRINGS 0 1 2)
-
+# 注：链接方式是**运行时**的（spclust::Linkage，构造 HAC 时给），所以库本身没有
+# 任何编译期选项 —— 一个二进制就能跑三种链接。命令行工具用 --linkage 选。
+# 默认值只在"本仓库独立构建"时开；被 add_subdirectory 进来时默认关。
+# 注意用 option() —— 它尊重用户已经在缓存的取值，所以 -DSPCLUST_BUILD_*=OFF 一定生效。
+# （以前这里是 set(... ON)，会把用户显式传的 OFF 覆盖掉。）
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
-    set(SPCLUST_BUILD_TOOLS ON)
-    set(SPCLUST_BUILD_TESTS ON)
+    set(_spclust_default ON)
+else()
+    set(_spclust_default OFF)
 endif()
-option(SPCLUST_BUILD_TOOLS "构建命令行工具 spclust_cli" ${SPCLUST_BUILD_TOOLS})
-option(SPCLUST_BUILD_TESTS "构建测试用的三种 linkage 二进制并注册 ctest" ${SPCLUST_BUILD_TESTS})
+option(SPCLUST_BUILD_TOOLS "构建命令行工具 spclust_cli" ${_spclust_default})
+option(SPCLUST_BUILD_TESTS "构建测试并注册 ctest" ${_spclust_default})
 
 # ---------------------------------------------------------------------------
 # 库（只有 src/hac.cpp；不依赖 tools/）
@@ -26,7 +28,6 @@ add_library(spclust src/hac.cpp)
 add_library(spclust::spclust ALIAS spclust)
 
 target_compile_features(spclust PUBLIC cxx_std_17)
-target_compile_definitions(spclust PRIVATE LINKAGE_MTD=${SPCLUST_LINKAGE})
 target_include_directories(spclust
     PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
@@ -86,29 +87,34 @@ install(FILES
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/spclust)
 
 # ---------------------------------------------------------------------------
-# 测试：三种 linkage 各一个二进制 + ctest
+# 测试
 # ---------------------------------------------------------------------------
 if(SPCLUST_BUILD_TESTS)
     enable_testing()
     find_package(Python3 COMPONENTS Interpreter REQUIRED)
 
-    set(test_bins "")
-    foreach(m 0 1 2)
-        set(bin "spclust_cli_linkage_${m}")
-        add_executable(${bin} tools/spclust_cli.cpp tools/readdb.cpp src/hac.cpp)
-        target_compile_definitions(${bin} PRIVATE
-            LINKAGE_MTD=${m} MIN_SIM_CLUST=50 DEBUG=1)
-        target_include_directories(${bin} PRIVATE include tools)
-        list(APPEND test_bins ${bin})
-    endforeach()
+    # 库级属性测试：三个切树接口（期望值用"从合并树自底向上收集叶子"独立算出）
+    if(TARGET spclust_cli)
+        set(cli_bin ${CMAKE_CURRENT_BINARY_DIR}/spclust_cli)
+    else()
+        # 只编库时，测试需要一个带 CLI 的二进制
+        set(cli_bin "")
+    endif()
 
-    # 差分测试：独立 oracle 逐次合并比对 + CLI 契约测试
-    add_test(NAME differential
-             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_tests.py
-                     --bin-prefix ${CMAKE_CURRENT_BINARY_DIR}/spclust_cli_linkage_ --min-sim 50)
-    add_test(NAME cli
-             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli.py
-                     --bin ${CMAKE_CURRENT_BINARY_DIR}/spclust_cli)
-    set_tests_properties(differential cli PROPERTIES
-                         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    add_executable(cut_property tests/test_cut.cpp)
+    target_link_libraries(cut_property PRIVATE spclust::spclust)
+    add_test(NAME cut_property COMMAND cut_property)
+
+    # 差分测试：独立 oracle 逐次合并比对 + CLI 契约测试。
+    # 链接方式现在是运行时的，所以一个二进制 --linkage 0/1/2 就覆盖三种。
+    if(cli_bin)
+        add_test(NAME differential
+                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/run_tests.py
+                         --bin ${cli_bin} --min-sim 50)
+        add_test(NAME cli
+                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli.py
+                         --bin ${cli_bin})
+        set_tests_properties(differential cli PROPERTIES
+                             WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+    endif()
 endif()
