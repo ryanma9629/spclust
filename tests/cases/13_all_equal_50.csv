@@ -1,4 +1,5 @@
-# Every edge is exactly the threshold -> every step is both a tie and a boundary case. Many WARN.
+# Every edge is exactly the threshold -> every step is both a tie and a boundary case.
+# The tie rule decides every merge here, so this case pins it hard.
 a,b,50
 a,c,50
 b,c,50

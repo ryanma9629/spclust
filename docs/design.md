@@ -90,9 +90,32 @@ per process, and changing the linkage meant recompiling. All of that state now l
   entry points (`add_edge` / `build` / `cut` / ...), while the inner loops stay in one function
   where the linkage is known, leaving no branch in the hot path - a measured cost of 0.2-0.6%
   (alternating A/B, min/quartile/median agreeing).
+- **The merge workspace is released when `build()` returns**: the node pool and the O(n) buffers
+  (row/column vectors, marks, cached similarities, heap, group table) are handed back rather than
+  kept at capacity, so a process holding the result owns roughly the tree - about 32 bytes per
+  object - instead of several times that. At n = 1M that is 30.5 MB instead of 163.5 MB measured in
+  allocated bytes. Re-building on the same object re-allocates the workspace, measured to cost
+  nothing outside noise.
 - **Cutting is a pure function**: the union-find parent array is a local of `cut()`. It used to
   be a file static, which made `cut()` nominally `const` while mutating global state and let
   concurrent cuts corrupt each other.
+
+## Tie breaking
+
+When several candidate pairs share the highest similarity, the winner is the one with the
+**smaller (left, right) id pair** - first the smaller left id, then the smaller right id. The
+same rule holds for all three linkages, and it is implemented in three places:
+
+- `entry_less`, the heap comparator: on equal similarity the smaller **row** (= smaller left id)
+  is the larger heap key;
+- `add_grp`, when a cell is inserted and has to displace the row's current max;
+- the max-repair loop, which rescans a row whose `max` was invalidated.
+
+All three go through one helper, `beats(sim_a, col_a, sim_b, col_b)`. Two of the three used to
+take the *first* candidate they met (`>` instead of `>=` plus an id comparison), which meant the
+chain order - i.e. the order edges were added in - decided the outcome. Measured at the time:
+four to five of six input permutations produced a different tree. With ids deciding, the tree is
+a function of the edge set alone, which is what `tests/test_cut.cpp` now asserts.
 
 ## Cutting
 

@@ -7,6 +7,42 @@ This file records changes that matter to users. Per-change implementation detail
 the measurements behind every performance change and the methodology corrections) lives in
 the git history, where each commit is independently revertible.
 
+## [0.3.3] - 2026-10
+
+### Changed
+
+- **Ties are now specified by id instead of being "unspecified".** Among pairs tied on the highest
+  similarity the one with the **smaller (left, right) id pair** wins, for all three linkages. This
+  makes the tree a function of the edge set alone: adding the same edges with the same ids in any
+  order now produces a byte-identical tree. If you relied on the old wording - or if your
+  reproducibility came from a fixed input order - note that the *rule* is new even though the
+  *tree* is usually the same.
+- `build()` now releases its workspace, so an object kept for cutting holds roughly the tree
+  (~32 bytes per object) rather than several times that: 30.5 MB instead of 163.5 MB at n = 1M,
+  measured in allocated bytes. Re-building on the same object re-allocates it, measured to cost
+  nothing outside noise.
+
+### Fixed
+
+- Ties were actually resolved by **insertion order**, not by id: `add_grp`'s max insertion, the
+  max-repair loop and `record_sim_g1/g2` all took the first candidate they met. Feeding the same
+  edges in six shuffled orders produced a different tree in four to five of them (Kruskal was
+  already order-independent). All three sites now share one `beats()` helper, and
+  `tests/test_cut.cpp` asserts order independence as a property - verified to fail against the
+  pre-fix code.
+- `record_sim_g1/g2` recorded a derived similarity with "first write wins" while the documented
+  semantic is that duplicates take the maximum. For duplicate pairs with different values the
+  derived similarity therefore depended on insertion order. They now take the maximum, which is
+  what the documentation always said.
+- `free_mem()` used `clear()`, which keeps capacity, so the whole O(n) workspace stayed resident
+  after `build()`.
+
+### Notes
+
+- Re-verified after this change: differential `PASS=102 WARN=0` (was `PASS=90 WARN=12`), cut
+  property `PASS=18288 FAIL=0`, CLI 11/11, C API 64+31, scipy interop 46 combinations, ASan/UBSan
+  clean, ctest 6/6, and the benchmark still matches the recorded baseline.
+
 ## [0.3.2] - 2026-10
 
 ### Added

@@ -24,8 +24,10 @@ then compared, one by one, with what the library returns.
 
 Coverage: three linkages x 21 random graphs (2-40 objects, dense/sparse/with duplicate edges),
 plus tied thresholds, `k > n`, `cut(0)`, monotonicity (every cluster of `k-1` must be an exact
-union of clusters from `k`), and the rule that a cluster's cohesion equals the value recorded by
-the merge that created it. Finally there is the **multiple instances** section: two datasets
+union of clusters from `k`), the rule that a cluster's cohesion equals the value recorded by the
+merge that created it, and **order independence**: a deliberately tie-heavy case (similarities
+drawn from four levels) is fed in eight shuffled orders per linkage, and every tree must be
+byte-identical. Finally there is the **multiple instances** section: two datasets
 across three objects, interleaved edges and interleaved `build()` calls, must reproduce the solo
 runs byte for byte - the property that mattered most after moving 34 file statics into an object.
 
@@ -85,7 +87,7 @@ similarity) and on the final partition. Disagreements fall into six classes:
 | Mark | Meaning |
 |---|---|
 | `PASS` | exactly consistent with the definition |
-| `WARN` | a tie for the maximum (or a tie created by truncation) makes the merge order unspecified; both sides may be legal |
+| `WARN` | a step where the merge order was decided by a tie and the two sides disagreed. Since ties are now specified by id (see design.md), this is expected to be **0** - a WARN now means the rule is violated |
 | `TRUNC` | the deviation is fully explained by `unsigned short` integer truncation (see known issue 1) |
 | `KNOWN` | a divergence listed in `tests/known_divergences.txt` and accepted as explicable |
 | `DRIFT` / `FAIL` / `ORACLE` | unexplained deviation / different results / the harness itself is inconsistent - all three fail `make test` |
@@ -119,13 +121,14 @@ What is compared is the **full merge tree** (the runner passes `--floor 0` to sp
 threshold. On top of that, ten thresholds are cut separately for cross-validation (900 = 90 PASS
 results x 10 thresholds). **KNOWN is now empty** - the one divergence that was ever registered
 (duplicate-pair semantics) disappeared once the semantics were settled and both sides were
-aligned. WARN rose from 8 to 12 because a tree reaching down to low similarities has more ties,
-which is normal.
+aligned. WARN went from 12 to **0** when the tie rule was specified by id and the oracle was
+aligned to the same rule: the 12 comparisons that used to be "both sides legal" are now demanded
+to match exactly, and they do.
 
 The conclusion: **the linked-list maintenance in `src/hac.cpp` is reliable** - across 44 objects,
 43 consecutive merges and seven input shapes (dense complete graph, star, long chain, several
 connected components, zero-similarity edges, reversed input, fractional similarities) the 64
-comparisons under max/min linkage show only WARNs (ties) and the registered duplicate-pair
+comparisons under max/min linkage showed only WARNs (ties) and the registered duplicate-pair
 divergence.
 
 After the fix, average linkage's residual against the exact definition is purely floating-point:

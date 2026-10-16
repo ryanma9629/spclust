@@ -12,7 +12,9 @@
  *   * if a pair appears more than once the largest value wins;
  *   * self-loops, negative values and NaN are reported as errors (a non-zero
  *     status, never a crash);
- *   * the merge order of tied similarities is not specified;
+ *   * ties are broken by id, not by insertion order: among pairs tied on similarity the
+ *     **smaller (left, right) id pair** wins, so the same edges with the same ids give a
+ *     byte-identical tree in any order;
  *   * one handle holds one independent state, separate handles never affect each
  *     other; a single handle is not thread-safe.
  *

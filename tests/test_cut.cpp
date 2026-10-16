@@ -309,6 +309,58 @@ void feed(HAC& hac, const Case& c) {
 		hac.add_edge(c.a[i], c.b[i], c.sim[i]);
 }
 
+// A case that is deliberately full of ties: similarities come from a handful of levels,
+// so most steps have several candidates with the same value.
+Case make_tie_case(std::size_t n, std::size_t m, std::mt19937& rng) {
+	Case c;
+	c.n = n;
+	const double levels[4] = {90.0, 80.0, 70.0, 60.0};
+	std::vector<char> seen(n * n, 0);
+	while (c.a.size() < m) {
+		std::size_t x = 0, y = 0;
+		x = rng() % n;
+		y = rng() % n;
+		if (x == y) continue;
+		if (x > y) std::swap(x, y);
+		if (seen[x * n + y]) continue;
+		seen[x * n + y] = 1;
+		c.a.push_back((std::uint32_t)x);
+		c.b.push_back((std::uint32_t)y);
+		c.sim.push_back(levels[rng() % 4]);
+	}
+	return c;
+}
+
+// (8) The documented tie rule, and the property it exists for: the tree must be a function
+// of the edge set and the ids alone, never of the order add_edge was called in. Without the
+// rule (and the three places that implement it) this fails immediately - before it was
+// specified, four to five of six permutations produced a different tree.
+void test_order_independence(const Case& c) {
+	g_ctx = "order independence";
+	for (int m = 0; m < 3; m++) {
+		HAC ref((Linkage)m);
+		feed(ref, c);
+		ref.build(0.0);
+		const std::string want = tree_key(ref.tree());
+
+		std::mt19937 rng(4242);
+		for (int k = 0; k < 8; k++) {
+			std::vector<std::size_t> order(c.a.size());
+			for (std::size_t i = 0; i < order.size(); i++) order[i] = i;
+			std::shuffle(order.begin(), order.end(), rng);
+			HAC h((Linkage)m);
+			for (std::size_t i = 0; i < order.size(); i++)
+				h.add_edge(c.a[order[i]], c.b[order[i]], c.sim[order[i]]);
+			h.build(0.0);
+			if (tree_key(h.tree()) != want) {
+				check(false, "the tree changed when the edges were added in a different order");
+				break;
+			}
+		}
+		g_pass++;
+	}
+}
+
 // (6)(7) Multiple instances / reentrancy: the property that mattered most after moving 34 file
 // statics into an object. One clustering per process used to be the limit; now two states used
 void test_instances(const Case& c1, const Case& c2) {
@@ -390,6 +442,14 @@ int main() {
 				run_one(c, mtds[m], names[m], seed);
 			seed++;
 		}
+	}
+
+	// Order independence on a tie-heavy case
+	{
+		std::mt19937 rng3(20261017);
+		test_order_independence(make_tie_case(16, 70, rng3));
+		test_order_independence(make_tie_case(31, 200, rng3));
+		test_order_independence(make_case(24, 40, rng3));
 	}
 
 	// Multiple instances / reentrancy (two random cases, interleaved edges)

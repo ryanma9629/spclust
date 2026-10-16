@@ -21,11 +21,15 @@
 //   * Similarities must be finite and non-negative; negative values and NaN
 //     throw std::invalid_argument. There is no upper bound - the historical
 //     65535 limit was an artifact of an unsigned short representation.
-//   * **The merge order of tied similarities is not specified.** Within one
-//     linkage the behaviour is deterministic, but it may differ between linkages
-//     and between versions. Under MaxSimilarity the resulting groups are
-//     order-independent anyway (they are connected components); under Average and
-//     MinNonzero they may differ.
+//   * **Ties are broken by id, not by the order edges were added.** When several
+//     pairs are tied on similarity, the one with the **smaller (left, right) id
+//     pair** wins: first the smaller left id, then the smaller right id. The same
+//     rule applies to all three linkages. Together with "similarity is a pure
+//     function of the edge set", this makes the result **reproducible**: adding the
+//     same edges with the same ids in any order produces a byte-identical tree
+//     (tested in tests/test_cut.cpp). Note this is a guarantee about ids, not about
+//     input lines - if you let something else assign ids by first appearance, then
+//     reordering the input renumbers the objects and the tree changes with it.
 //   * One HAC object holds one independent state; separate objects never affect
 //     each other. A single object is **not thread-safe** - not even reading it
 //     concurrently with writing.
@@ -109,6 +113,12 @@ public:
 	// (merging until no positive-similarity candidate is left).
 	// Note this is the depth of the tree, not a clustering threshold; cut()
 	// decides where to cut.
+	//
+	// The workspace used by the merge loop (the node pool and several O(n) buffers)
+	// is released when this returns, so a process that keeps the result for cutting
+	// holds roughly the tree itself - about 32 bytes per object - rather than
+	// several times that. Re-feeding and building again on the same object
+	// re-allocates it; measured to cost nothing outside noise.
 	void build(double floor = 0.0);
 
 	// Number of objects (= number of leaves).

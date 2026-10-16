@@ -211,7 +211,11 @@ def hac(order, edges, linkage="average", min_sim=50, mode="brute"):
         if not cand:
             break
 
-        best_val, i, j = max(cand)
+        # The documented tie rule: among candidates tied on similarity, the one with the
+        # **smaller (i, j) id pair** wins. Taking max() over (value, i, j) as before would
+        # pick the *largest* pair instead, which is the opposite rule - and comparing the
+        # two sides only makes sense when they agree on how ties are resolved.
+        best_val, i, j = max(cand, key=lambda c: (c[0], -c[1], -c[2]))
         #A similarity <= 0 stops merging - aligned with spclust's get_max() (0 is not a candidate).
         #So min_sim=0 gives the **full merge tree**; min_sim>0 merely stops early (equivalent
         if best_val < min_sim or best_val <= 0:

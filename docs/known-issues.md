@@ -60,6 +60,53 @@ input - the just-freed memory happened to read back as 0 and the merge order cam
 **Only ASan caught it.** Comparing results and checking memory safety are two independent jobs, and
 both are needed.
 
+### Ties were resolved by insertion order, not by id (determinism)
+
+With several candidate pairs tied on the highest similarity, which one got merged depended on the
+order `add_edge` had been called in. Measured before the fix: feeding the same 60 edges in six
+shuffled orders produced a **different tree in four to five of them**, for both Average and
+MinNonzero (Kruskal was already order-independent, because its comparator is a total order on
+`(sim, a, b)`).
+
+Three separate places chose a candidate with a strict `>`, so the first one encountered won - and
+"first encountered" means chain order, which is insertion order:
+
+- `add_grp`, when inserting a cell and displacing the row's current max;
+- the max-repair loop, rescanning a row whose `max` was invalidated;
+- `record_sim_g1/g2`, which recorded a derived similarity with `if (slot < 0) slot = v;` - the
+  first write - so for duplicate pairs with different values the *derived* value depended on
+  insertion order even though the merge value did not.
+
+All of them now go through one helper, `beats(sim_a, col_a, sim_b, col_b)` = "higher similarity
+wins, ties go to the smaller column id", which makes the merged pair the smallest `(left, right)`
+id pair among those tied. The same rule is stated in `include/spclust/hac.h`, and
+`tests/test_cut.cpp` asserts it as a property: the same edges in shuffled order must produce a
+byte-identical tree. Verified red/green - against the pre-fix code the new check fails 5 times and
+exits 1.
+
+The differential test is the strongest evidence that the rule is what the header claims: aligning
+the oracle's argmax to the same rule took that suite from `PASS=90 WARN=12` to **`PASS=102 WARN=0`**,
+i.e. all twelve comparisons that used to be "both sides legal" now match exactly.
+
+### The workspace stayed resident after `build()` (memory)
+
+`free_mem()` called `clear()` on the O(n) workspace buffers, and `clear()` keeps capacity. After
+`build()` returned, a process holding the result still owned the node pool's pages plus the row and
+column vectors, the mark vector, `sim_g1`/`sim_g2`, the row versions, the heap and the group table -
+none of which anything can read again. Measured with `malloc_zone_statistics` (in-use bytes, not
+RSS, which includes pages the allocator has not returned to the OS) at n = 1M:
+
+| | Held after `build()` |
+|---|---|
+| before | **163.5 MB** |
+| after | **30.5 MB** |
+
+which is the tree itself (1M merges x 32 bytes = 31 MB) and nothing else. The cost is that a later
+`build()` on the same object re-allocates the workspace; measured with 13 alternating runs on the
+reuse path, the difference is inside the noise (0.991x at n=200k, and at n=600k min/q1/median did
+not agree, so no conclusion was drawn). RSS itself barely moves - the pages stay with the allocator
+- which is exactly why in-use bytes are the right metric here.
+
 ### Three O(n) sweeps per merge (performance)
 
 The old `merge_grp` allocated three O(n) mark vectors per merge and then did
@@ -423,7 +470,11 @@ Everything below comes from measurement or static analysis. The first two **have
 When the same `(obj1, obj2)` appears more than once with different `sim`, the semantics are **the
 larger value wins**. This is not a guess: taking the maximum and swapping the two lines both merge
 the same pair with value 90; internally the merge value comes from `get_max()` (the row maximum) and
-derived similarities are recorded by maximum too (`record_sim_g1/g2`). The oracle models the same
+derived similarities are recorded by maximum too (`record_sim_g1/g2`). That last part was
+actually **not** true before this was fixed - the code took the first cell the chain walk
+reached, so for duplicate pairs with different values the *derived* similarity depended on
+insertion order while the merge value did not. `record_sim_g1/g2` now take the maximum,
+which is what the sentence above always claimed. The oracle models the same
 semantics, so **this divergence no longer exists** (the six known divergences that were registered
 became XPASS and were deleted).
 
@@ -486,7 +537,9 @@ edges that actually exist).
 ### 6. Static analysis only; the tests do not distinguish these (results are unaffected)
 
 - `grp` / `vec_dim1` / `vec_dim2` grow monotonically to about 2n-1; merged slots are cleared but
-  never reclaimed.
+  never reclaimed. -> the capacity is now released when `build()` returns (see below); a long-lived
+  process holding results used to keep ~133 MB per 1M-object result that nothing could ever read
+  again.
 - `MIN_ACCT_NUM` and `MIN_SIM_WG` were defined but never used. -> deleted.
 - `using namespace std;` lived in headers and `grp` was wired up with globals plus `extern`. ->
   fixed: the headers no longer say `using namespace std`, and all 34 file statics moved into

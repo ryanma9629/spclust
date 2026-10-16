@@ -80,7 +80,7 @@ spclust::HAC other(spclust::Linkage::MaxSimilarity);
 
 **Read the contract at the top of `include/spclust/hac.h` before using it** (an absent edge
 counts as 0, ids must be dense, repeated pairs take the maximum, self-loops throw, the merge
-order of tied similarities is not specified, one object holds one independent state that is
+order of ties is decided by id rather than by insertion order, one object holds one independent state that is
 not safe to read concurrently with a write). How the linkage shapes the clusters is in
 [docs/design.md](docs/design.md#linkage-methods).
 
@@ -206,9 +206,10 @@ In scipy `height` is a **distance** (smaller merges first) while this library wo
 **Three differences worth knowing** (semantics rather than bugs; all pinned by
 `tests/test_scipy.py`):
 
-1. **Ties.** Equal similarities never guaranteed a merge order. That includes **derived
-   values**: with 28 distinct input values, intermediate similarities still collide (this is
-   what `15_many_merges.csv` does). The two trees then differ, and both are legal.
+1. **Ties.** Our tie rule is specified (the smaller id pair wins), scipy's is its own. That
+   difference shows up when **derived** values collide, not only equal inputs: with 28 distinct
+   input values, intermediate similarities still collide (this is what `15_many_merges.csv`
+   does). The two trees then differ, and both are legal.
 2. **`MinNonzero` is not scipy's `complete`.** scipy reaches the maximum distance
    (= similarity 0) on missing pairs, so on sparse input almost everything looks far apart,
    while this library takes the minimum only over pairs where both sides have an edge. **On
@@ -234,12 +235,15 @@ In scipy `height` is a **distance** (smaller merges first) while this library wo
 - Differential test: an independent reference implementation (with no Lance-Williams
   recurrence) compared merge by merge, plus 22 hand-written boundary cases and 900
   multi-threshold cut cross-checks. Currently `PASS=90 WARN=12 KNOWN=0 FAIL=0` (a WARN is an
-  unspecified merge order caused by a tie; both sides are legal).
+  unspecified merge order caused by a tie; both sides are legal). Ties themselves are now
+  specified (smaller id pair wins), so the differential test demands an exact match and this
+  count is **0**.
 - Cut property test (`tests/test_cut.cpp`, library level): the expectations are not a second
   copy of the union-find but come from **collecting leaf sets bottom-up from the merge tree** -
   a different code path. It covers three linkages x 21 random graphs x tied thresholds,
-  exactly k clusters, minimum cluster size, cohesion provenance and monotonicity, plus
-  multiple instances and reset reuse. Currently `PASS=18281 FAIL=0`.
+  exactly k clusters, minimum cluster size, cohesion provenance and monotonicity, plus order
+  independence (the same edges in shuffled order must give a byte-identical tree) and multiple
+  instances with reset reuse. Currently `PASS=18288 FAIL=0`.
 - scipy interop (`tests/test_scipy.py`): the `--scipy` export is handed to the **real scipy**.
   23 cases x 2 linkages, all format-valid, and on the tie-free cases **row-for-row identical**
   to scipy's own `linkage`; tie cases are skipped and labelled as the contract allows.

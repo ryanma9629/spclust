@@ -260,14 +260,21 @@ bool mark_dirty_max(size_t x) { return set_flag(x, F_DIRTY_MAX); }
 //get_unit() walks the chain from the head (add_grp inserts at the head, i.e. the last
 //cell inserted) and takes the first match, so the first write corresponds to the same
 //cell - which keeps behaviour identical for inputs with duplicate pairs.
+//Record the similarity from index x to group1 / group2. This is a **maximum**: the same
+//pair can be on the structure more than once (duplicate input pairs), and the documented
+//semantic is that the largest value wins - which must hold for derived similarities too,
+//not just for the merge value itself. Taking the first cell the chain walk happens to
+//reach instead would make the result depend on the order add_edge was called in.
+//sim_g1/sim_g2 start at -1 (the "no edge" sentinel) and values are non-negative, so the
+//first write still initialises the slot.
 void record_sim_g1(size_t x, double v) {
 	set_flag(x, F_SIM_G1);
-	if (sim_g1[x] < 0)
+	if (sim_g1[x] < v)
 		sim_g1[x] = v;
 }
 void record_sim_g2(size_t x, double v) {
 	set_flag(x, F_SIM_G2);
-	if (sim_g2[x] < 0)
+	if (sim_g2[x] < v)
 		sim_g2[x] = v;
 }
 
@@ -304,8 +311,10 @@ vector<char> row_live;        // whether the row is currently non-empty (drives 
 size_t live_rows = 0;
 
 //Heap order: compare similarity first; on a tie the smaller row index counts as
-//"larger". This reproduces the old implementation's tie behaviour (ascending i scan,
-//taking over only on a strictly greater value).
+//"larger". Together with the column tie-break in the max repair this makes the merged
+//pair the smallest (left, right) id pair among those tied on similarity - the rule
+//documented in spclust/hac.h. That the ids decide, rather than the order edges were
+//added in, is what makes the result reproducible.
 static bool entry_less(const SimEntry& a, const SimEntry& b) {
 	if (a.sim != b.sim)
 		return a.sim < b.sim;
@@ -390,6 +399,17 @@ void note_row_changed(size_t row) {
 vector<grp_s> grp;
 
 //Insert a (group1, group2, sim) cell into the structure, always at the head of its list
+//Decide which of two candidate cells of the **same row** the row's max pointer should hold:
+//higher similarity wins, and on a tie the smaller column id. This one rule, applied in
+//add_grp (initial insertion) and in the max repair, is what makes the merged pair the
+//smallest (left, right) id pair among those tied on similarity - the rule documented in
+//spclust/hac.h. Leaving either site with a strict '>' would let insertion order decide.
+static bool beats(double sim_a, uint32_t col_a, double sim_b, uint32_t col_b) {
+	if (sim_a != sim_b)
+		return sim_a > sim_b;
+	return col_a < col_b;
+}
+
 uint32_t add_grp(size_t group1, size_t group2, double sim) {
 	//group1 is always kept smaller than group2
 	if (group1 > group2)
@@ -408,8 +428,13 @@ uint32_t add_grp(size_t group1, size_t group2, double sim) {
 	arena[unit] = sp_unit{ SP_NONE, SP_NONE, SP_NONE, SP_NONE,
 		(uint32_t)group1, (uint32_t)group2, sim };
 
-	//If this row has no max yet or the new cell is larger, update the row vector's max pointer
-	if (SP_NONE == vec_dim1[group1].max || arena[vec_dim1[group1].max].sim < sim) {
+	//If this row has no max yet, or the new cell beats the current one, update the row
+	//vector's max pointer. "Beats" means higher similarity, and on a tie the **smaller
+	//column id** - the same rule the max repair uses, so that the row's max is decided by
+	//ids rather than by which edge was added first.
+	if (SP_NONE == vec_dim1[group1].max ||
+		beats(sim, (uint32_t)group2, arena[vec_dim1[group1].max].sim,
+			  arena[vec_dim1[group1].max].group2)) {
 		vec_dim1[group1].max = unit;
 		note_row_changed(group1);
 	}
@@ -848,17 +873,18 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 		size_t i = dirty_max[k];
 		uint32_t u = vec_dim1[i].head;
 		uint32_t best = SP_NONE;
-		//walk left to right and find the maximum
+		//Walk the row and find the maximum. On a tie the **smaller column id** wins, not
+		//the first cell encountered on the chain (see `beats`).
 		while (SP_NONE != u) {
-			if (SP_NONE == best || arena[u].sim > arena[best].sim)
+			if (SP_NONE == best || beats(arena[u].sim, arena[u].group2, arena[best].sim,
+									   arena[best].group2))
 				best = u;
 			u = arena[u].right;
 		}
 		//This assignment must be unconditional. The old form was `if (arena[u].sim > max)`
 		//with max initialised to 0: if a whole row had similarity 0 it never assigned, and
 		//vec_dim1[i].max kept a pointer to freed memory, so the next get_max() was a
-		//heap-use-after-free (see tests/cases/22_zero_row_max.csv). `best` is still "the
-		//first cell left to right attaining the maximum", so ties behave as before.
+		//heap-use-after-free (see tests/cases/22_zero_row_max.csv).
 		vec_dim1[i].max = best;
 		note_row_changed(i);
 	}
@@ -877,7 +903,20 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 	return grp.size();
 }
 
+//Release the group table. Safe to call twice (clear+swap leaves an empty vector).
+void release_groups(void) { release(grp); }
+
 //Release the memory used by the structure
+//Shrink a vector to zero capacity. Plain clear() only drops the elements and keeps the
+//capacity, which is exactly how ~220 MB per held result stayed resident at n = 1M: every
+//one of the O(n) workspace buffers below is a vector, and after build() nothing reads any
+//of them again. The cost of re-growing them in a later build() on the same object is a
+//handful of large allocations, which the measurement below shows is negligible.
+template <typename T>
+static void release(std::vector<T>& v) {
+	std::vector<T>().swap(v);
+}
+
 void free_mem(void) {
 	//The node pool is one contiguous block: hand it back whole, no per-node traversal.
 	//Unpoison everything first so no poisoning is left on memory returned to the allocator.
@@ -899,23 +938,19 @@ void free_mem(void) {
 	for (size_t i = 0; i < vec_dim2.size(); i++)
 		vec_dim2[i].head = SP_NONE;
 
-	vec_dim1.clear();
-	vec_dim2.clear();
-
-	//release the buffers reused during merging as well
-	mark_flags.clear();
-	sim_g1.clear();
-	sim_g2.clear();
-	updated.clear();
-	dirty_max.clear();
-	touched.clear();
-	krusk_edges.clear();
-	vector<krusk_edge>().swap(krusk_edges);
-	krusk_parent.clear();
-	vector<uint32_t>().swap(krusk_parent);
-	heap.clear();
-	row_version.clear();
-	row_live.clear();
+	release(vec_dim1);
+	release(vec_dim2);
+	release(mark_flags);
+	release(sim_g1);
+	release(sim_g2);
+	release(updated);
+	release(dirty_max);
+	release(touched);
+	release(krusk_edges);
+	release(krusk_parent);
+	release(heap);
+	release(row_version);
+	release(row_live);
 	live_rows = 0;
 }
 
@@ -937,6 +972,7 @@ void build(double floor) {
 		//single linkage: edges sorted by similarity descending + union-find, O(m log m)
 		clust_kruskal(floor);
 		free_mem();
+		release_groups();
 		return;
 	}
 
@@ -965,8 +1001,15 @@ void build(double floor) {
 		rec.size = grp[new_grp].n_members;
 		merges.push_back(rec);
 	}
-	//clustering finished: release the structure's memory
+	//Clustering finished: release the structure's memory, and the group table too.
+	//`grp` has about 2n slots (16 bytes each) and nothing reads it after this point -
+	//cut()/tree()/num_objects() all work off `merges` and `n_objects`. Keeping it would
+	//leave ~32 bytes per object of dead resident memory in any process that holds the
+	//result, which matters for a long-lived service or a Python session with several
+	//HAC objects. This does not change peak memory: the peak is during the merge loop,
+	//where the table is needed.
 	free_mem();
+	release_groups();
 }
 
 // ---------------------------------------------------------------------------
@@ -1118,10 +1161,8 @@ Cut cut_min_size(std::size_t min_size) const {
 
 void reset() {
 	free_mem();
-	grp.clear();
-	std::vector<grp_s>().swap(grp);
-	merges.clear();
-	std::vector<Merge>().swap(merges);
+	release_groups();
+	release(merges);
 	n_objects = 0;
 }
 
