@@ -1,4 +1,4 @@
-# 星型：一个 hub 连多个叶子。观察 hub 结构在 average 下的生长与稀释速度。
+# A star: one hub joined to several leaves, to watch growth and dilution under average linkage.
 h,l1,90
 h,l2,85
 h,l3,80

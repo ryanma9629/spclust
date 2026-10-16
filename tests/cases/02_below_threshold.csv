@@ -1,4 +1,4 @@
-# 全部边都低于 MIN_SIM_CLUST(50) → 应该一个都不合并。
+# Every edge is below MIN_SIM_CLUST (50) -> nothing should merge.
 a,b,49
 c,d,49
 e,f,1

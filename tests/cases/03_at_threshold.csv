@@ -1,4 +1,4 @@
-# 边界：sim 恰好 == 阈值。spclust 的判断是 max_sim < MIN_SIM_CLUST 才停，
-# 所以 ==50 应该合并、49 不该合并。边界条件最容易写错。
+# Boundary: sim exactly == the threshold. spclust stops only when max_sim < MIN_SIM_CLUST,
+# so ==50 must merge and 49 must not. Boundary conditions are the easiest thing to get wrong.
 a,b,50
 c,d,49

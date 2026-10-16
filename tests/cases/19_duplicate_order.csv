@@ -1,6 +1,6 @@
-# 重复 pair 的"先后顺序"会不会影响结果？
-# 实测：不会 —— 取的是较大的那个值（90），与写入顺序无关。
-# （19 这个用例存在的意义就是钉住这条：把 90/80 换个顺序，结果必须一样。）
+# Does the order of a duplicated pair change the result?
+# Measured: no - the larger value (90) wins regardless of insertion order.
+# (This case exists to pin exactly that: swap 90/80 and the result must be identical.)
 a,b,90
 a,b,80
 a,c,88

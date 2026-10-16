@@ -1,4 +1,4 @@
-# 三个成簇的对 + 一对低于阈值的“孤立点”。
+# Three clusterable pairs plus one pair of below-threshold "isolated points".
 a,b,90
 c,d,88
 e,f,86

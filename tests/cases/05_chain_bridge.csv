@@ -1,8 +1,8 @@
-# 平均链接的“稀释效应”：
-#   {a1,a2,a3} 与 {b1,b2,b3} 各自紧致，a3-b1=58 是两组间唯一的桥（高于阈值）。
-# 但 a1-a3 缺边，所以 {a1,a2} 对 a3 的相似度 = (0+94)/2 = 47 < 50，
-# 桥在一次合并后就被平均到阈值以下 → average 下两组永不合并；
-# 而 max 链接会顺着这条桥把全部对象串成一簇（chaining）。
+# The dilution effect of average linkage:
+#   {a1,a2,a3} and {b1,b2,b3} are each tight, and a3-b1=58 is the only bridge above the threshold.
+# But a1-a3 is absent, so the similarity of {a1,a2} to a3 is (0+94)/2 = 47 < 50: the bridge
+# drops below the threshold after one merge, so under average the two groups never merge -
+# while max linkage chains everything into one cluster along that bridge.
 a1,a2,95
 a2,a3,94
 b1,b2,93

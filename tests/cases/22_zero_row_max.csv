@@ -1,12 +1,12 @@
-# 触发 spclust.cpp:73 的 heap-use-after-free（修复前）。
-# 对象首现顺序 r,a,b,c -> r=0 a=1 b=2 c=3。
-# (0,1)=0 先插入，是 row0 的 max；后来 (0,3)=0 由于 0<0 为假，不会顶替它。
-# 合并 a,b（(1,2)=90 是全局最大）时：(0,1) 落在被删的 column 1，
-# 于是 update_max[0]=1；但 row0 里还有幸存的 (0,3)=0，
-# 而修复循环的判据是 u->sim > max(初值 0)，全 0 行永远不会重新赋值
-# -> vec_dim1[0].max 仍指向已 free 的 (0,1)，下一轮 get_max() 直接 UAF。
-# 注意：这条不是靠差分测试抓的（读到的垃圾值很可能仍是 0，结果凑巧正确），
-# 而是靠 make asan-cases 抓的 —— 差分测试查结果，ASan 查内存安全，两者都需要。
+# Triggers a heap-use-after-free in the max-pointer repair (before the fix).
+# Objects first appear as r,a,b,c -> r=0 a=1 b=2 c=3.
+# (0,1)=0 is inserted first and becomes row0's max; (0,3)=0 does not displace it because 0<0 is false.
+# Merging a and b ((1,2)=90 is the global maximum) removes column 1, where (0,1) lives,
+# so row 0 must repair its max. But row0 still holds the surviving (0,3)=0, and
+# the repair loop tested u->sim > max with max initialised to 0, so an all-zero row was never
+# reassigned and vec_dim1[0].max kept pointing at the freed (0,1): the next get_max() was a UAF.
+# Note this was not caught by the differential test (the garbage read is very likely still 0,
+# making the result accidentally correct) but by `make asan-cases`: the differential test checks
 r,a,0
 a,b,90
 r,c,0

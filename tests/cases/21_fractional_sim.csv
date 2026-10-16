@@ -1,5 +1,5 @@
-# 相似度用小数：既然内部改成 double，就没有理由再拒绝 87.5 这种输入。
-# 顺带覆盖阈值的小数边界：50.05 应该合并、49.9 不该、0.5 是极小值。
+# Fractional similarities: with double internally there is no reason to reject 87.5.
+# Also covers fractional threshold boundaries: 50.05 must merge, 49.9 must not, 0.5 is tiny.
 a1,a2,87.5
 a1,a3,86.25
 a2,a3,90.125

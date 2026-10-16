@@ -1,8 +1,8 @@
-# 同一个 pair 出现两次且 sim 不同。
-# 语义：**取较大的那个值**（实测：交换两行顺序，结果都是合并成同一对、值都是 90）。
-# 实现上两个单元都会进结构，合并值来自 get_max()（行内最大值），
-# 而派生相似度也统一按最大值记录 —— 见 spclust.cpp 的 record_sim_g1/g2。
-# oracle 已按同一语义建模，所以两边不再分歧（原先登记的 known divergence 已删除）。
+# The same pair appears twice with different sim values.
+# Semantics: the **larger** value wins (measured: swapping the two lines still merges the same
+# pair with value 90). Internally both cells are inserted, and the merge value comes from
+# get_max() (the row maximum), with derived similarities recorded by maximum too - see
+# record_sim_g1/g2 in the core. The oracle models the same semantics, so the two no longer
 a,b,90
 a,b,80
 c,d,70

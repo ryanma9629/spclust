@@ -2,16 +2,16 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2022-2026 Ryan Ma <pningma@sina.com>
 #
-# C API 的 FFI 测试：用 ctypes 从 Python 调它。
-#
-# 为什么除了 test_c_api.c（真 C 编译器）还要这一层：C 接口的主要用途就是给**别的运行时**
-# 调（Rust / Go / Python / Julia...）。真 C 那一层验证的是头文件与 ABI；这一层验证的是
-# 共享库能被动态加载、extern "C" 的符号名在外部运行时里找得到、指针/结构体布局对得上、
-# 并且**跨语言调用不会因为异常而炸掉进程**（比如自环必须返回错误码，而不是 terminate）。
-#
-# 需要一个共享库：make test-c 会顺手编一个（见 Makefile）。
-#   python3 tests/test_c_api.py --lib /tmp/libspclust.so
+# FFI test for the C API: call it from Python via ctypes.
 
+# Why this layer exists on top of test_c_api.c (a real C compiler): the main use of a C
+# interface is being called from **other runtimes** (Rust / Go / Python / Julia ...). The C
+# layer verifies the header and the ABI; this layer verifies that the shared library can be
+# loaded dynamically, that the extern "C" symbol names are findable from a foreign runtime, that
+# pointer/struct layout matches, and - most importantly - that **a cross-language call cannot
+# kill the process through an exception** (a self-loop must return an error code, not terminate).
+
+# Needs a shared library: make test-c builds one (see the Makefile).
 import argparse
 import ctypes
 import sys
@@ -41,8 +41,8 @@ ERR_INVALID_ARGUMENT = 1
 
 
 def main():
-    ap = argparse.ArgumentParser(description="C API 的 ctypes/FFI 测试")
-    ap.add_argument("--lib", required=True, help="共享库路径（libspclust.so/.dylib）")
+    ap = argparse.ArgumentParser(description="ctypes/FFI test for the C API")
+    ap.add_argument("--lib", required=True, help="path to the shared library (libspclust.so)")
     args = ap.parse_args()
 
     lib = ctypes.CDLL(args.lib)
@@ -57,7 +57,7 @@ def main():
             fail += 1
             print(f"  ✗ {what}")
 
-    # ---- 签名 ----
+    # ---- signatures ----
     lib.spclust_version.restype = ctypes.c_char_p
     lib.spclust_last_error.restype = ctypes.c_char_p
     lib.spclust_linkage_from_name.argtypes = [ctypes.c_char_p]
@@ -95,68 +95,68 @@ def main():
         ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_size_t)]
     lib.spclust_hac_to_scipy.restype = ctypes.c_int
 
-    check(lib.spclust_version().decode() == "0.3.2", "版本字符串")
-    check(lib.spclust_linkage_from_name(b"single") == 1, "名字解析")
+    check(lib.spclust_version().decode() == "0.3.2", "version string")
+    check(lib.spclust_linkage_from_name(b"single") == 1, "name lookup")
 
-    # ---- 非法 linkage：必须返回 NULL 而不是抛异常穿出 C 边界 ----
-    check(not lib.spclust_hac_new(7), "非法 linkage -> NULL")
-    check(lib.spclust_last_error() is not None, "last_error 有内容")
+    # ---- bad linkage: must return NULL rather than throw through the C boundary ----
+    check(not lib.spclust_hac_new(7), "bad linkage -> NULL")
+    check(lib.spclust_last_error() is not None, "last_error has content")
 
     h = lib.spclust_hac_new(0)
-    check(bool(h), "建 handle")
+    check(bool(h), "create handle")
     for a, b, s in EDGES:
         check(lib.spclust_hac_add_edge(h, a, b, s) == OK, f"add_edge({a},{b})")
     check(lib.spclust_hac_build(h, 0.0) == OK, "build")
     check(lib.spclust_hac_num_objects(h) == N, "num_objects")
 
-    # **关键**：自环在 C++ 里是抛异常，从 Python 调必须拿到错误码。
-    # 如果异常真的穿过去了，这里会直接 abort 掉整个进程（测试就崩了）。
+    # **The key one**: a self-loop throws in C++, so a call from Python must yield an error code.
+    # If the exception really escaped, this would abort the whole process (and the test would die).
     check(lib.spclust_hac_add_edge(h, 2, 2, 1.0) == ERR_INVALID_ARGUMENT,
-          "自环 -> 错误码（异常没有穿过 C 边界）")
-    check(b"NUL" not in (lib.spclust_last_error() or b""), "last_error 是 C 字符串")
+          "self-loop -> error code (the exception did not cross the C boundary)")
+    check(b"NUL" not in (lib.spclust_last_error() or b""), "last_error is a C string")
 
-    # ---- 树：两段式（先问长度再填缓冲）----
+    # ---- tree: the two-call pattern (ask for the length, then fill the buffer) ----
     n = lib.spclust_hac_tree_size(h)
-    check(n == N - 1, "树有 n-1 行")
+    check(n == N - 1, "the tree has n-1 rows")
     got = ctypes.c_size_t(0)
-    check(lib.spclust_hac_tree(h, None, 0, ctypes.byref(got)) == OK, "只问行数")
-    check(got.value == n, "问出来的长度对")
+    check(lib.spclust_hac_tree(h, None, 0, ctypes.byref(got)) == OK, "ask for the length only")
+    check(got.value == n, "the reported length is right")
     rows = (Merge * n)()
-    check(lib.spclust_hac_tree(h, rows, n, ctypes.byref(got)) == OK, "取树")
-    check(rows[0].size == 2 and rows[-1].size == N, "第一/最后一行的 size")
-    check(abs(rows[0].similarity - 91.0) < 1e-9, "第一次合并的相似度（结构体布局对）")
+    check(lib.spclust_hac_tree(h, rows, n, ctypes.byref(got)) == OK, "fetch the tree")
+    check(rows[0].size == 2 and rows[-1].size == N, "sizes of the first and last rows")
+    check(abs(rows[0].similarity - 91.0) < 1e-9, "similarity of the first merge (struct layout matches)")
 
-    # ---- 切树：offsets/members 的视图 ----
+    # ---- cutting: the offsets/members views ----
     c = lib.spclust_hac_cut(h, 50.0)
     check(bool(c), "cut(50)")
     ng = lib.spclust_cut_n_groups(c)
     nm = lib.spclust_cut_n_members(c)
-    check(ng == 3 and nm == N, "3 个簇、成员总数 n")
+    check(ng == 3 and nm == N, "3 clusters and n members in total")
     off = lib.spclust_cut_offsets(c)
     mem = lib.spclust_cut_members(c)
     groups = [sorted(mem[off[g]:off[g + 1]]) for g in range(ng)]
-    check(groups == [[0, 1], [2, 3], [4, 5]], f"分组内容 {groups}")
+    check(groups == [[0, 1], [2, 3], [4, 5]], f"cluster contents {groups}")
     lib.spclust_cut_free(c)
 
     c = lib.spclust_hac_cut_n_clusters(h, 2)
     check(lib.spclust_cut_n_groups(c) == 2, "cut_n_clusters(2)")
     lib.spclust_cut_free(c)
 
-    # ---- scipy 导出 ----
+    # ---- scipy export ----
     cnt = ctypes.c_size_t(0)
     comps = ctypes.c_size_t(0)
     check(lib.spclust_hac_to_scipy(h, 0, 0.0, 0, float("nan"), None, 0,
                                    ctypes.byref(cnt), ctypes.byref(comps)) == OK,
-          "scipy 导出：问行数")
-    check(cnt.value == N - 1 and comps.value == 1, "行数 n-1、1 个分量")
+          "scipy export: ask for the row count")
+    check(cnt.value == N - 1 and comps.value == 1, "n-1 rows and 1 component")
     srows = (ScipyRow * cnt.value)()
     check(lib.spclust_hac_to_scipy(h, 0, 0.0, 0, float("nan"), srows, cnt.value,
                                    ctypes.byref(cnt), ctypes.byref(comps)) == OK,
-          "scipy 导出：取行")
-    check(srows[0].left < srows[0].right, "子节点升序")
+          "scipy export: fetch the rows")
+    check(srows[0].left < srows[0].right, "children are ascending")
 
     lib.spclust_hac_free(h)
-    lib.spclust_hac_free(None)          # 不该崩
+    lib.spclust_hac_free(None)          # must not crash
 
     print("--------------------------------------------------------------------")
     print(f"PASS={pass_} FAIL={fail}")

@@ -1,5 +1,5 @@
-# 只写一个方向、且把“大”的那个写在前面：add_grp 强制 group1<group2，
-# 所以书写顺序不该影响结果。测试这个隐含的对称化假设。
+# Only one direction is written, with the "larger" object first: add_grp forces group1 < group2,
+# so the written order must not matter. This tests that implicit symmetrization.
 b,a,90
 d,c,85
 a,c,88

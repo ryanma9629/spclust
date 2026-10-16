@@ -2,22 +2,24 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2022-2026 Ryan Ma <pningma@sina.com>
 #
-# scipy 互操作测试：把 `spclust_cli --scipy` 的导出交给**真的 scipy** 去读。
-#
-# 这一层存在的理由：前面所有测试都用我们自己写的 oracle 当尺子。这里换成 scipy ——
-# 一个完全不同来源、被广泛使用的实现。它验证两件事：
-#   1. 格式真的合规（scipy 的 is_valid_linkage / to_tree / fcluster 能直接用）；
-#   2. 语义真的对得上（在**没有并列**的用例上，逐行与 scipy 自己的 linkage 完全相同）。
-#
-# 语义对应的关键：本库的"缺失边 = 相似度 0"正好对应"距离 = C - 相似度"（C = 最大相似度），
-# 于是 average 链接等价于 scipy 的 method='average' 作用在同一个稠密距离矩阵上。
-#
-# 关于并列：相似度相等时合并顺序本就不作保证（契约里写了）。注意**输入值全不同也会出现并列**
-# ——派生出来的中间相似度会撞在一起（实测 15_many_merges.csv 就是这样）。所以逐行比对
-# 只在"该用例该 linkage 没有并列"时做（并列与否问 oracle），否则只查格式合规。
-#
-# 运行：python3 tests/test_scipy.py --bin ./spclust [--venv /tmp/bvenv/bin/python]
-# 没有 scipy 时整体跳过（返回 0），这样 CI 上不装 scipy 也能过。
+# scipy interop test: hand the `spclust_cli --scipy` export to the **real scipy**.
+
+# Why this layer exists: every previous test used an oracle we wrote ourselves. Here the ruler
+# is scipy - a completely differently sourced, widely used implementation. It checks two things:
+#   1. the format really is valid (scipy's is_valid_linkage / to_tree / fcluster accept it);
+#   2. the semantics really match (on cases **without ties**, row for row identical to scipy).
+
+# The key to that correspondence: this library's "an absent edge is similarity 0" is exactly
+# "distance = C - similarity" (C = the largest similarity), so average linkage equals scipy's
+# method='average' applied to the same dense distance matrix.
+
+# About ties: equal similarities never guaranteed a merge order (the contract says so). Note that
+# **distinct input values can still tie** - derived intermediate similarities collide (measured:
+# 15_many_merges.csv does exactly that). So the row-by-row comparison runs only when the case and
+# linkage are tie-free (asked of the oracle); otherwise only format validity is checked.
+
+# Run: python3 tests/test_scipy.py --bin ./spclust
+# Without scipy the whole test skips and returns 0, so CI can run without it.
 
 import argparse
 import subprocess
@@ -31,16 +33,17 @@ import oracle  # noqa: E402
 
 CASES = sorted(str(p) for p in (HERE / "cases").glob("*.csv")) + [str(REPO / "sim.csv")]
 
-# 本库的 linkage -> scipy 的 method。注意第三个是**故意不同的**：
-#   Linkage::MinNonzero 只对"两边都存在的边"取最小；scipy 的 complete 在缺失对上取到
-#   最大距离（= 相似度 0）。稠密输入下两者相同（已实测），稀疏下不同。
-# (本库 linkage 编号, oracle 里的名字, scipy 的 method 名)
+# This library's linkage -> scipy's method. Note the third pair is **deliberately different**:
+#   Linkage::MinNonzero takes the minimum only over pairs where both sides have an edge, while
+#   scipy's complete reaches the maximum distance (= similarity 0) on missing pairs. On dense
+#   input they agree (measured); on sparse input they do not.
+# (spclust linkage id, the name used by the oracle, scipy's method name)
 MATCHING = [(0, "average", "average"), (1, "max", "single")]
 KNOWN_DIFFERENT = (2, "complete")
 
 
 def parse_matrix(text):
-    """解析 --scipy 的输出（# 开头是注释；允许 inf）。"""
+    """Parse the --scipy output (# starts a comment; inf is allowed)."""
     rows = []
     for line in text.splitlines():
         if line.startswith("#") or not line.strip():
@@ -60,12 +63,13 @@ def run_scipy(bin_path, case, linkage, extra=()):
         [str(bin_path), str(case), "--linkage", str(linkage), "--scipy", *extra],
         cwd=str(REPO), capture_output=True, text=True)
     if proc.returncode != 0:
-        raise RuntimeError(f"spclust 退出码 {proc.returncode}:\n{proc.stderr}")
+        raise RuntimeError(f"spclust exited with {proc.returncode}:\n{proc.stderr}")
     return parse_matrix(proc.stdout), proc.stderr
 
 
 def dense_from_case(case):
-    """(对象名顺序, 稠密相似度矩阵, 最大相似度)。缺失 pair 为 0 —— 与本库语义一致。"""
+    """(object name order, dense similarity matrix, largest similarity). Missing pairs are 0,
+    matching this library's semantics."""
     import numpy as np
     order, edges, _ = oracle.load_edges(case)
     n = len(order)
@@ -78,7 +82,8 @@ def dense_from_case(case):
 
 
 def n_forest_skip(case, linkage_name, n):
-    """树不是完整树（合并次数 < n-1）就不做逐行比对 —— 桥接行的顺序是任意的。"""
+    """A tree that is not complete (fewer than n-1 merges) is not compared row by row -
+    the order of bridging rows is arbitrary."""
     order, edges, _ = oracle.load_edges(case)
     res = oracle.hac(order, edges, linkage_name, 0,
                      "brute" if len(order) <= 24 else "fast")
@@ -93,7 +98,7 @@ def has_ties(case, linkage_name):
 
 
 def main():
-    ap = argparse.ArgumentParser(description="scipy 互操作测试")
+    ap = argparse.ArgumentParser(description="scipy interop test")
     ap.add_argument("--bin", default="./spclust")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
@@ -107,13 +112,13 @@ def main():
         from scipy.cluster.hierarchy import (linkage as scipy_linkage, fcluster,
                                              is_valid_linkage, is_monotonic, to_tree)
     except ImportError as e:
-        print(f"跳过 scipy 互操作测试：{e}")
-        print("（装上 numpy/scipy 再跑，例如 python3 -m venv /tmp/v && /tmp/v/bin/pip install numpy scipy）")
+        print(f"skipping the scipy interop test: {e}")
+        print("(install numpy/scipy to run it, e.g. python3 -m venv /tmp/v && /tmp/v/bin/pip install numpy scipy)")
         return 0
 
     print("=" * 78)
-    print(f"spclust x scipy 互操作    {bin_path}    scipy {__import__('scipy').__version__}"
-          f"    用例 {len(CASES)} 个")
+    print(f"spclust x scipy interop    {bin_path}    scipy {__import__('scipy').__version__}"
+          f"    {len(CASES)} cases")
     print("=" * 78)
 
     bad = []
@@ -134,48 +139,49 @@ def main():
             rows, stderr = run_scipy(bin_path, case, mtd, ("--scipy-bridge",))
             Z = np.array(rows) if rows else np.empty((0, 4))
 
-            # ① 格式合规：scipy 自己要认
+            # (1) Format validity: scipy itself must accept it
             if not is_valid_linkage(Z, throw=False, warning=False) or not is_monotonic(Z):
-                bad.append(f"{name} linkage={mtd}: scipy 认为是非法 linkage 矩阵")
+                bad.append(f"{name} linkage={mtd}: scipy considers the linkage matrix invalid")
                 continue
             try:
                 to_tree(Z)
                 fcluster(Z, 2, criterion='maxclust')
             except Exception as e:                                    # pragma: no cover
-                bad.append(f"{name} linkage={mtd}: scipy 下游函数失败 {e}")
+                bad.append(f"{name} linkage={mtd}: a downstream scipy function failed: {e}")
                 continue
             n_valid += 1
 
-            # ② 语义对得上：**树是完整树**（我们的合并次数 = n-1）且没有并列时，
-            # 应当逐行与 scipy 完全相同。森林（有分量永远合不起来，桥接行是补的）
-            # 不在这个范围内 —— 桥接的距离语义正确，但分量的合并顺序是任意的。
+            # (2) Semantics: when the tree is **complete** (our merge count == n-1) and there are
+            # no ties, the rows must match scipy exactly. A forest (components that never merge,
+            # with bridging rows appended by us) is out of scope - the bridge distances are right,
+            # but the order in which components merge is arbitrary.
             Z_sc = scipy_linkage(cond, method=method)
             if len(Z) != len(Z_sc):
-                bad.append(f"{name} linkage={mtd}: 行数 {len(Z)} != scipy {len(Z_sc)}")
+                bad.append(f"{name} linkage={mtd}: rows {len(Z)} != scipy {len(Z_sc)}")
                 continue
             if ties:
                 n_tie += 1
                 if args.verbose:
-                    print(f"  (并列，跳过逐行比对) {name} linkage={mtd}")
+                    print(f"  (tie, skipping the row-by-row comparison) {name} linkage={mtd}")
                 continue
             if n_forest_skip(case, oracle_name, n):
                 if args.verbose:
-                    print(f"  (森林，跳过逐行比对) {name} linkage={mtd}")
+                    print(f"  (forest, skipping the row-by-row comparison) {name} linkage={mtd}")
                 continue
             same = True
             for i in range(len(Z)):
                 if {int(Z[i][0]), int(Z[i][1])} != {int(Z_sc[i][0]), int(Z_sc[i][1])} \
                    or abs(Z[i][2] - Z_sc[i][2]) > 1e-9 or int(Z[i][3]) != int(Z_sc[i][3]):
-                    bad.append(f"{name} linkage={mtd}: 第 {i} 行不同 "
+                    bad.append(f"{name} linkage={mtd}: row {i} differs "
                                f"{Z[i].tolist()} vs {Z_sc[i].tolist()}")
                     same = False
                     break
             if same:
                 n_exact += 1
 
-    # ③ 森林：残缺矩阵对 scipy 来说只是"另一个较小的 n"（它没能力发现少了几行），
-    #    所以这里查的是真正的保证：必须警告，且 --scipy-bridge 之后行数恰好 n-1、
-    #    最后一行的 size 恰好是 n。
+    # (3) Forests: an incomplete matrix looks to scipy like "a smaller n" (it cannot detect the
+    #     missing rows), so what is checked here is the real guarantee: it must warn, and after
+    #     --scipy-bridge the row count is exactly n-1 and the last size is exactly n.
     forest_checked = 0
     for case in CASES:
         order, edges, _ = oracle.load_edges(case)
@@ -184,27 +190,28 @@ def main():
             continue
         res = oracle.hac(order, edges, "min", 0, "brute" if n <= 24 else "fast")
         if len(res["merges"]) == n - 1:
-            continue                      # 树是完整的，这条检查不适用
+            continue                      # complete tree, this check does not apply
         forest_checked += 1
         plain, stderr_plain = run_scipy(bin_path, case, 2, ())
-        if "森林" not in stderr_plain:
-            bad.append(f"{Path(case).name}: 残缺树没有在 stderr 上警告")
+        if "forest" not in stderr_plain:
+            bad.append(f"{Path(case).name}: the incomplete tree did not warn on stderr")
         bridged, _ = run_scipy(bin_path, case, 2, ("--scipy-bridge",))
         if len(bridged) != n - 1:
-            bad.append(f"{Path(case).name}: 桥接后应有 n-1={n-1} 行，实际 {len(bridged)}")
+            bad.append(f"{Path(case).name}: after bridging there should be n-1={n-1} rows, got {len(bridged)}")
         elif int(bridged[-1][3]) != n:
-            bad.append(f"{Path(case).name}: 桥接后最后一行的 size 应是 {n}，"
-                       f"实际 {int(bridged[-1][3])}")
+            bad.append(f"{Path(case).name}: after bridging the last size should be {n}, "
+                       f"got {int(bridged[-1][3])}")
         if len(plain) >= len(bridged):
-            bad.append(f"{Path(case).name}: 桥接前后行数没有变化")
+            bad.append(f"{Path(case).name}: the row count did not change after bridging")
         if forest_checked >= 4:
             break
     if forest_checked == 0:
-        print("  （没有森林用例，跳过桥接检查）")
+        print("  (no forest cases, skipping the bridging check)")
     else:
-        print(f"  森林用例 {forest_checked} 个：都警告了，且桥接后行数 = n-1")
-    # ④ 已知不同：MinNonzero vs scipy complete。
-    #    稠密矩阵上两者必须相同；稀疏矩阵上允许不同（并应当真的不同，否则这条就没意义）。
+        print(f"  {forest_checked} forest cases: all warned, and bridging gives exactly n-1 rows")
+    # (4) Known difference: MinNonzero vs scipy complete.
+    #     On a dense matrix they must agree; on a sparse one they may differ (and should, or the
+    #     check would be pointless).
     dense_same = dense_total = sparse_same = sparse_total = 0
     for case in CASES:
         order, S, C = dense_from_case(case)
@@ -221,7 +228,7 @@ def main():
             continue
         same = all({int(Z[i][0]), int(Z[i][1])} == {int(Z_sc[i][0]), int(Z_sc[i][1])}
                    and abs(Z[i][2] - Z_sc[i][2]) <= 1e-9 for i in range(len(Z)))
-        # 稠密 = 所有 pair 都有边（上三角无 0）
+        # dense = every pair has an edge (no zero in the upper triangle)
         dense = bool((np.triu(S) > 0).sum() == n * (n - 1) // 2)
         if dense:
             dense_total += 1
@@ -230,17 +237,17 @@ def main():
             sparse_total += 1
             sparse_same += 1 if same else 0
     if dense_total and dense_same != dense_total:
-        bad.append(f"MinNonzero 与 scipy complete 在稠密输入上应当相同，"
-                   f"实际 {dense_same}/{dense_total}")
-    print(f"  稠密输入上 MinNonzero == scipy complete: {dense_same}/{dense_total}")
-    print(f"  稀疏输入上 MinNonzero == scipy complete: {sparse_same}/{sparse_total}"
-          f"（本来就该不同：scipy 在缺失对上取到最大距离）")
+        bad.append(f"MinNonzero and scipy complete must agree on dense input, "
+                   f"but {dense_same}/{dense_total} agree")
+    print(f"  dense input, MinNonzero == scipy complete: {dense_same}/{dense_total}")
+    print(f"  sparse input, MinNonzero == scipy complete: {sparse_same}/{sparse_total}"
+          f" (expected to differ: scipy reaches the maximum distance on missing pairs)")
 
     print("-" * 78)
-    print(f"格式合规 {n_valid} 组；逐行与 scipy 完全相同 {n_exact} 组；"
-          f"因并列跳过逐行比对 {n_tie} 组")
+    print(f"format valid in {n_valid} combinations; row-for-row identical to scipy in {n_exact};"
+          f" skipped because of ties in {n_tie}")
     if bad:
-        print("失败明细:")
+        print("failure detail:")
         for b in bad[:12]:
             print("  ✗", b)
     print(f"RESULT: {'PASS' if not bad else 'FAIL'}")

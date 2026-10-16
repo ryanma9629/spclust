@@ -1,5 +1,5 @@
-# 6 个对象的完全图，28 个值全不同 → 没有缺失边、没有并列。
-# 这是最接近“稠密 HAC”的用例，用来确认稀疏结构在稠密输入下也正确。
+# A complete graph on 6 objects with 28 distinct values -> no missing edges and no ties.
+# The closest thing here to a dense HAC, confirming the sparse structure is correct on dense input.
 a,b,95
 a,c,80
 a,d,60

@@ -1,4 +1,4 @@
-# 两个互不相连的连通分量，各自聚成一簇。
+# Two disconnected components, each clustering on its own.
 a1,a2,90
 a1,a3,80
 a2,a3,85

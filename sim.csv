@@ -1,21 +1,21 @@
-# spclust 示例输入：稀疏相似度边表
-#   格式: obj1,obj2,sim     （无表头；也接受制表符/空格分隔，以及 obj1,obj2,sim 表头行）
-#   sim 取值 0..65535，缺失的 pair 视为 0，不存储
-#   以 # 开头的行会被忽略
+# spclust sample input: a sparse similarity edge list
+#   format: obj1,obj2,sim   (no header; tabs and spaces are also accepted, as is an obj1,obj2,sim header)
+#   sim is 0..65535; an absent pair counts as 0 and is not stored
+#   lines starting with # are ignored
 #
-# 这份数据故意构造成 3 个分明的簇 + 4 个不成簇的对象：
-#   簇 A: a1 a2 a3 a4 a5   内部 sim 85..96
-#   簇 B: b1 b2 b3 b4      内部 sim 82..94
-#   簇 C: c1 c2 c3         内部 sim 76..88
-#   桥边: a4-c1 = 58       A、C 之间唯一一条超过阈值的边（会被平均链接稀释掉）
-#   弱边: a1-b1 = 42       低于 MIN_SIM_CLUST(50)，永远不触发合并
-#   噪声: d1-d2 = 45       同样低于阈值，所以 d1 d2 保持各自独立
-#   孤立: e1 只和 a1 有 12，e2 只和 c1 有 9 —— 有对象但不成簇
+# This data is deliberately built as 3 clear clusters plus 4 objects that never cluster:
+#   cluster A: a1 a2 a3 a4 a5   internal sim 85..96
+#   cluster B: b1 b2 b3 b4      internal sim 82..94
+#   cluster C: c1 c2 c3         internal sim 76..88
+#   bridge: a4-c1 = 58      the only above-threshold edge between A and C (diluted by average linkage)
+#   weak: a1-b1 = 42        below MIN_SIM_CLUST (50); never triggers a merge
+#   noise: d1-d2 = 45       also below the threshold, so d1 and d2 stay separate
+#   isolated: e1 has only 12 with a1, e2 only 9 with c1 - objects that never cluster
 #
-# 预期（默认 LINKAGE=0 average, MIN_SIM=50）：16 个对象、3 个簇、
-# 4 个未成簇对象（d1 d2 e1 e2）。
+# Expected (default: average linkage, MIN_SIM=50): 16 objects, 3 clusters and 4 unclustered
+# objects (d1 d2 e1 e2).
 
-# --- 簇 A ---
+# --- cluster A ---
 a1,a2,96
 a1,a3,91
 a1,a4,88
@@ -27,7 +27,7 @@ a3,a4,89
 a3,a5,92
 a4,a5,94
 
-# --- 簇 B ---
+# --- cluster B ---
 b1,b2,94
 b1,b3,87
 b1,b4,82
@@ -35,16 +35,16 @@ b2,b3,90
 b2,b4,85
 b3,b4,88
 
-# --- 簇 C ---
+# --- cluster C ---
 c1,c2,88
 c1,c3,76
 c2,c3,82
 
-# --- 簇之间的边 ---
+# --- edges between clusters ---
 a4,c1,58
 a1,b1,42
 
-# --- 噪声与孤立点 ---
+# --- noise and isolated points ---
 d1,d2,45
 e1,a1,12
 e2,c1,9

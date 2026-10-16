@@ -1,6 +1,6 @@
-# 为 min 链接（LINKAGE_MTD=2）准备：
-# min 只在“min 结果 == 0”时丢弃候选，等价于要求两簇之间是完整二部图。
-# 这里 {a1,a2} 与 {b1,b2} 之间 4 条边齐全，值都是 80。
+# Prepared for min linkage:
+# min discards a candidate when its result is 0, which amounts to requiring a complete bipartite
+# graph between the clusters. Here all 4 edges between {a1,a2} and {b1,b2} exist, all 80.
 a1,a2,94
 b1,b2,92
 a1,b1,80

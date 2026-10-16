@@ -1,4 +1,4 @@
-# 两个干净的簇，簇间只有远低于阈值的边。
+# Two clean clusters with only far-below-threshold edges between them.
 a1,a2,90
 a1,a3,85
 a2,a3,88

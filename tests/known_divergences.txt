@@ -1,14 +1,15 @@
-# 已知的、已确认可由实现语义解释的分歧。
-# 格式： <用例文件名>  <linkage>  <理由>
+# Known, accepted divergences that the implementation semantics explain.
+# Format: <case filename>  <linkage>  <reason>
 #
-# 只有当"分歧确实存在"时才应该留在这里；一旦分歧消失，测试会报 XPASS 提示清理。
-# 未经确认的分歧不允许写进来 —— 那正是测试要抓的东西。
+# An entry belongs here only while the divergence really exists; once it disappears the test
+# reports XPASS so it can be cleaned up. Unconfirmed divergences must not be listed here -
+# those are exactly what the test is meant to catch.
 #
-# 目前为空。
+# Currently empty.
 #
-# 曾经登记过 6 条（07_duplicate_edge.csv / 19_duplicate_order.csv × 3 种 linkage），
-# 理由是"重复 pair 语义未定义：spclust 取最大值，oracle 取最后一条"。
-# 后来把语义定清楚了 —— 同一个 pair 出现多次时取**最大值**（这正是 spclust 的实际行为：
-# 合并值来自 get_max()，即行内最大值；实测两组相反顺序的输入结果完全一致），
-# 并把 oracle 与 spclust 的派生相似度都对齐到"取最大"，两边就不再分歧了。
-# 这 6 条随即变成 XPASS，按规矩删除。
+# Six entries were once registered (07_duplicate_edge.csv / 19_duplicate_order.csv x 3 linkages)
+# for "duplicate-pair semantics undefined: spclust takes the maximum, the oracle takes the last".
+# The semantics were then settled - a repeated pair takes the **maximum**, which is what spclust
+# actually did (the merge value comes from get_max(), the row maximum), and the derived
+# similarities of the oracle and spclust were aligned to "take the maximum" as well, so the two
+# sides stopped disagreeing. Those six entries immediately became XPASS and were removed.

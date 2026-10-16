@@ -1,5 +1,5 @@
-# 8 个对象的完全图，28 个值全不同 → 会连续合并 7 次。
-# 专门压十字链表的行/列摘除与 max 指针修复路径（最容易写错的地方）。
+# A complete graph on 8 objects with 28 distinct values -> 7 consecutive merges.
+# Targets the row/column removal and max-pointer repair paths of the cross-linked list, the
 c0,c1,99
 c0,c2,71
 c0,c3,62
