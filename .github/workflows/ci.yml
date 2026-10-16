@@ -15,32 +15,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: scipy 互操作要用到它（没有就让该测试自动跳过）
+      - name: Needed by the scipy interop test (it skips itself when absent)
         run: python3 -m pip install --quiet --disable-pip-version-check numpy scipy
 
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 
-      - name: Build (库 + CLI + 测试)
+      - name: Build (library + CLI + tests)
         run: cmake --build build --parallel
 
-      - name: Test (切树属性测试 + 差分测试 + CLI 契约测试)
+      - name: Test (cut properties + differential + CLI contract)
         run: ctest --test-dir build --output-on-failure
 
-      - name: 链接方式必须是运行时的（一个二进制跑三种，结果必须互不相同）
+      - name: The linkage must be a run-time choice (one binary, three different results)
         run: |
           set -e
           for m in 0 1 2; do
             ./build/spclust_cli sim.csv --linkage "$m" --matrix > "/tmp/m$m.txt"
           done
           if cmp -s /tmp/m0.txt /tmp/m1.txt && cmp -s /tmp/m0.txt /tmp/m2.txt; then
-            echo "三种 linkage 输出完全相同，可疑"; exit 1
+            echo "all three linkages produced identical output, which is suspicious"; exit 1
           fi
 
       - name: Sanitizers (ASan/UBSan over the case corpus)
         run: make asan-cases
 
-      - name: 只编库（验证库不依赖 tools/，也验证那两个开关真的生效）
+      - name: Library-only build (proves no dependency on tools/ and that the options work)
         run: |
           set -e
           cmake -S . -B build-libonly -DSPCLUST_BUILD_TOOLS=OFF -DSPCLUST_BUILD_TESTS=OFF

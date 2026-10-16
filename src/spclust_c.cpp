@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2022-2026 Ryan Ma <pningma@sina.com>
 //
-// C 接口的实现。三条原则：
-//   1. C++ 异常绝不穿过 C 边界 —— 每个入口都 try/catch，转成 spclust_status；
-//   2. C 侧的返回值不持有库内部的对象（除了 handle 与 spclust_cut，它们有配套的 free）；
-//   3. 错误细节放在**线程局部**的字符串里，取用不需要加锁。
+// Implementation of the C interface. Three rules:
+//   1. C++ exceptions never cross the C boundary - every entry point try/catches into spclust_status;
+//   2. nothing returned to C owns a library object (except the handle and spclust_cut, which have free functions);
+//   3. error details live in a **thread-local** string, so reading them needs no locking.
 
 #include "spclust/spclust_c.h"
 
@@ -23,7 +23,7 @@
 
 namespace {
 
-// 线程局部的错误信息。C 侧拿到的是它的 c_str()，一直有效到本线程下次调用本库。
+// Thread-local error message. C receives its c_str(), valid until this thread next calls the library.
 std::string& error_slot() {
 	static thread_local std::string msg;
 	return msg;
@@ -38,7 +38,7 @@ void clear_error() { error_slot().clear(); }
 
 spclust_status fail_from_exception() {
 	try {
-		throw;                       // 重新抛出以取得类型
+		throw;                       // rethrow to inspect the type
 	} catch (const std::bad_alloc&) {
 		return fail(SPCLUST_ERR_OUT_OF_MEMORY, "out of memory");
 	} catch (const std::invalid_argument& e) {
@@ -62,8 +62,8 @@ spclust::Linkage to_linkage(int linkage) {
 	}
 }
 
-// spclust_cut 的真实内容：把 vector<vector<uint32_t>> 摊平成一维，
-// 免得让 C 侧处理嵌套容器。
+// The real contents of spclust_cut: vector<vector<uint32_t>> flattened into one dimension,
+// so the C side never has to deal with nested containers.
 struct CutBox {
 	std::vector<uint32_t> members;
 	std::vector<std::size_t> offsets;   // n_groups + 1
@@ -72,7 +72,7 @@ struct CutBox {
 
 } // namespace
 
-// ODR：C 头里声明的是不完整类型，这里给出定义。
+// ODR: the C header declares an incomplete type; the definition lives here.
 struct spclust_cut {
 	CutBox box;
 };
@@ -80,7 +80,7 @@ struct spclust_cut {
 extern "C" {
 
 const char* spclust_version(void) {
-	// 由头文件里的宏字符串化而来，避免两处版本号漂移（测试会拿它与发布号字面量比对）
+	// Stringified from the header macros so the two versions cannot drift (the test checks it against the release literal)
 #define SPCLUST_STR_(x) #x
 #define SPCLUST_STR(x) SPCLUST_STR_(x)
 	return SPCLUST_STR(SPCLUST_VERSION_MAJOR) "."
@@ -99,7 +99,7 @@ int spclust_linkage_from_name(const char* name) {
 	if (!name)
 		return -1;
 	const char* table[] = {"average", "max-similarity", "min-nonzero"};
-	// 命令行工具用的那些别名也认（--linkage max / single / min 都接受）
+	// The aliases the CLI accepts are recognized too (--linkage max / single / min)
 	const char* alias[] = {"max", "single", "min"};
 	const int alias_id[] = {SPCLUST_LINKAGE_MAX_SIMILARITY,
 							SPCLUST_LINKAGE_MAX_SIMILARITY,
@@ -115,7 +115,7 @@ int spclust_linkage_from_name(const char* name) {
 
 spclust_hac* spclust_hac_new(int linkage) {
 	if (!valid_linkage(linkage)) {
-		fail(SPCLUST_ERR_INVALID_ARGUMENT, "linkage 必须是 0/1/2");
+		fail(SPCLUST_ERR_INVALID_ARGUMENT, "linkage must be 0/1/2");
 		return NULL;
 	}
 	clear_error();
@@ -133,13 +133,13 @@ void spclust_hac_free(spclust_hac* h) {
 	try {
 		delete reinterpret_cast<spclust::HAC*>(h);
 	} catch (...) {
-		// 析构里不该抛；真抛了也不能让它跑出去
+		// a destructor should not throw; if it does, it must not escape
 	}
 }
 
 spclust_status spclust_hac_reserve(spclust_hac* h, size_t n_objects, size_t n_edges) {
 	if (!h)
-		return fail(SPCLUST_ERR_INVALID_ARGUMENT, "handle 是 NULL");
+		return fail(SPCLUST_ERR_INVALID_ARGUMENT, "handle is NULL");
 	clear_error();
 	try {
 		reinterpret_cast<spclust::HAC*>(h)->reserve(n_objects, n_edges);
@@ -152,7 +152,7 @@ spclust_status spclust_hac_reserve(spclust_hac* h, size_t n_objects, size_t n_ed
 spclust_status spclust_hac_add_edge(spclust_hac* h, uint32_t a, uint32_t b,
 									double similarity) {
 	if (!h)
-		return fail(SPCLUST_ERR_INVALID_ARGUMENT, "handle 是 NULL");
+		return fail(SPCLUST_ERR_INVALID_ARGUMENT, "handle is NULL");
 	clear_error();
 	try {
 		reinterpret_cast<spclust::HAC*>(h)->add_edge(a, b, similarity);
@@ -164,7 +164,7 @@ spclust_status spclust_hac_add_edge(spclust_hac* h, uint32_t a, uint32_t b,
 
 spclust_status spclust_hac_build(spclust_hac* h, double floor) {
 	if (!h)
-		return fail(SPCLUST_ERR_INVALID_ARGUMENT, "handle 是 NULL");
+		return fail(SPCLUST_ERR_INVALID_ARGUMENT, "handle is NULL");
 	clear_error();
 	try {
 		reinterpret_cast<spclust::HAC*>(h)->build(floor);
@@ -176,7 +176,7 @@ spclust_status spclust_hac_build(spclust_hac* h, double floor) {
 
 spclust_status spclust_hac_reset(spclust_hac* h) {
 	if (!h)
-		return fail(SPCLUST_ERR_INVALID_ARGUMENT, "handle 是 NULL");
+		return fail(SPCLUST_ERR_INVALID_ARGUMENT, "handle is NULL");
 	clear_error();
 	try {
 		reinterpret_cast<spclust::HAC*>(h)->reset();
@@ -213,7 +213,7 @@ const char* spclust_hac_linkage_name(const spclust_hac* h) {
 spclust_status spclust_hac_tree(const spclust_hac* h, spclust_merge* out,
 								size_t cap, size_t* count) {
 	if (!h || !count)
-		return fail(SPCLUST_ERR_INVALID_ARGUMENT, "h 或 count 是 NULL");
+		return fail(SPCLUST_ERR_INVALID_ARGUMENT, "h or count is NULL");
 	clear_error();
 	try {
 		const std::vector<spclust::Merge>& tr =
@@ -222,14 +222,14 @@ spclust_status spclust_hac_tree(const spclust_hac* h, spclust_merge* out,
 		if (!out)
 			return SPCLUST_OK;
 		if (cap < tr.size()) {
-			for (size_t i = 0; i < cap; i++) {   // 能填多少填多少，方便诊断
+			for (size_t i = 0; i < cap; i++) {   // fill as much as fits, to help diagnose
 				out[i].left = tr[i].left;
 				out[i].right = tr[i].right;
 				out[i].similarity = tr[i].similarity;
 				out[i].cohesion = tr[i].cohesion;
 				out[i].size = tr[i].size;
 			}
-			return fail(SPCLUST_ERR_BUFFER_TOO_SMALL, "输出缓冲不够（*count 是需要的行数）");
+			return fail(SPCLUST_ERR_BUFFER_TOO_SMALL, "output buffer too small (*count holds the required row count)");
 		}
 		for (size_t i = 0; i < tr.size(); i++) {
 			out[i].left = tr[i].left;
@@ -244,7 +244,7 @@ spclust_status spclust_hac_tree(const spclust_hac* h, spclust_merge* out,
 	}
 }
 
-// ------------------------------------------------------------------ 切树
+// ------------------------------------------------------------------ cutting
 
 namespace {
 
@@ -269,7 +269,7 @@ spclust_cut* box_cut(const spclust::Cut& c) {
 
 spclust_cut* spclust_hac_cut(const spclust_hac* h, double min_similarity) {
 	if (!h) {
-		fail(SPCLUST_ERR_INVALID_ARGUMENT, "handle 是 NULL");
+		fail(SPCLUST_ERR_INVALID_ARGUMENT, "handle is NULL");
 		return NULL;
 	}
 	clear_error();
@@ -283,7 +283,7 @@ spclust_cut* spclust_hac_cut(const spclust_hac* h, double min_similarity) {
 
 spclust_cut* spclust_hac_cut_n_clusters(const spclust_hac* h, size_t k) {
 	if (!h) {
-		fail(SPCLUST_ERR_INVALID_ARGUMENT, "handle 是 NULL");
+		fail(SPCLUST_ERR_INVALID_ARGUMENT, "handle is NULL");
 		return NULL;
 	}
 	clear_error();
@@ -297,7 +297,7 @@ spclust_cut* spclust_hac_cut_n_clusters(const spclust_hac* h, size_t k) {
 
 spclust_cut* spclust_hac_cut_min_size(const spclust_hac* h, size_t min_size) {
 	if (!h) {
-		fail(SPCLUST_ERR_INVALID_ARGUMENT, "handle 是 NULL");
+		fail(SPCLUST_ERR_INVALID_ARGUMENT, "handle is NULL");
 		return NULL;
 	}
 	clear_error();
@@ -338,16 +338,16 @@ const double* spclust_cut_cohesion(const spclust_cut* c) {
 	return (c && !c->box.cohesion.empty()) ? c->box.cohesion.data() : NULL;
 }
 
-// ------------------------------------------------------------------ scipy 导出
+// ------------------------------------------------------------------ scipy export
 
 spclust_status spclust_hac_to_scipy(const spclust_hac* h, int distance_map,
 									double reference, int bridge, double bridge_distance,
 									spclust_scipy_row* out, size_t cap,
 									size_t* count, size_t* n_components) {
 	if (!h || !count)
-		return fail(SPCLUST_ERR_INVALID_ARGUMENT, "h 或 count 是 NULL");
+		return fail(SPCLUST_ERR_INVALID_ARGUMENT, "h or count is NULL");
 	if (distance_map < SPCLUST_DISTANCE_COMPLEMENT || distance_map > SPCLUST_DISTANCE_RECIPROCAL)
-		return fail(SPCLUST_ERR_INVALID_ARGUMENT, "distance_map 必须是 0/1/2");
+		return fail(SPCLUST_ERR_INVALID_ARGUMENT, "distance_map must be 0/1/2");
 	clear_error();
 	try {
 		const spclust::HAC* hac = reinterpret_cast<const spclust::HAC*>(h);
@@ -364,7 +364,7 @@ spclust_status spclust_hac_to_scipy(const spclust_hac* h, int distance_map,
 		if (!out)
 			return SPCLUST_OK;
 		if (cap < e.rows.size())
-			return fail(SPCLUST_ERR_BUFFER_TOO_SMALL, "输出缓冲不够（*count 是需要的行数）");
+			return fail(SPCLUST_ERR_BUFFER_TOO_SMALL, "output buffer too small (*count holds the required row count)");
 		for (size_t i = 0; i < e.rows.size(); i++) {
 			out[i].left = e.rows[i].left;
 			out[i].right = e.rows[i].right;

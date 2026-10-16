@@ -17,7 +17,7 @@ using namespace std;
 
 namespace {
 
-//去掉首尾空白（以及可有可无的成对双引号）
+//Trim leading/trailing whitespace (plus an optional matching pair of double quotes)
 string trim(const string& s) {
 	size_t b = s.find_first_not_of(" \t\r\n\"");
 	if (string::npos == b)
@@ -26,7 +26,7 @@ string trim(const string& s) {
 	return s.substr(b, e - b + 1);
 }
 
-//把一行拆成字段：含逗号就按逗号拆（CSV），否则按空白拆
+//Split a line into fields: by comma when the line contains one (CSV), otherwise by whitespace
 void split_fields(const string& line, vector<string>& out) {
 	out.clear();
 	if (string::npos != line.find(',')) {
@@ -48,8 +48,9 @@ void split_fields(const string& line, vector<string>& out) {
 	}
 }
 
-//严格解析相似度：必须是 [0, MAX_SIM_READ] 范围内的十进制数（允许小数，如 87.5）。
-//上界是 CLI 的输入契约（历史遗留，库本身没有这个上限）。
+//Strictly parse the similarity: a decimal number within [0, MAX_SIM_READ],
+//fractions allowed (e.g. 87.5). The upper bound is the CLI's input contract
+//(historical; the library itself has no such limit).
 bool parse_sim(const string& s, double& out) {
 	if (s.empty())
 		return false;
@@ -58,14 +59,14 @@ bool parse_sim(const string& s, double& out) {
 	double v = strtod(s.c_str(), &end);
 	if (0 != errno || end == s.c_str() || '\0' != *end)
 		return false;
-	//注意不能写成 (v < 0 || v > MAX_SIM_READ)：那样 "nan" 会静默通过
+	//Note: writing this as (v < 0 || v > MAX_SIM_READ) would let "nan" pass silently
 	if (!(v >= 0.0 && v <= (double)MAX_SIM_READ))
 		return false;
 	out = v;
 	return true;
 }
 
-//识别可选表头行（obj1,obj2,sim），大小写不敏感
+//Recognize the optional header line (obj1,obj2,sim), case-insensitively
 bool is_header(const vector<string>& f) {
 	string a = f[0], b = f[1], c = f[2];
 	for (size_t i = 0; i < a.size(); i++) a[i] = (char)tolower((unsigned char)a[i]);
@@ -76,14 +77,16 @@ bool is_header(const vector<string>& f) {
 
 } // namespace
 
-//小批量缓冲：读满一批再回调。
-//纯流式（每条边立刻回调）会把“建结构”插进解析循环，解析阶段的 cache 工作集被结构增长
-//污染 —— 实测 2M 条边时“读+建”从 0.313s 涨到 0.416s，整体慢 7%。加一层小批量之后
-//解析阶段是热的、建结构阶段也是批量的，内存只多一批（64k 条 ≈ 3.6 MB）。
-//对照（2M 条边，各 7 次交替取中位）：
-//   先全读再建      1.303s   401.3 MB
-//   纯流式          1.393s   219.4 MB
-//   流式 + 64k 批   1.301s   223.0 MB
+//Small batches: fill one batch, then call back.
+//Purely streaming (calling back per edge) interleaves structure building into the
+//parsing loop, so the parse phase's cache working set is polluted by the growing
+//structure - measured on 2M edges, "read + build" went from 0.313s to 0.416s,
+//7% slower overall. With batching, parsing stays hot and building stays batched,
+//at the cost of one batch of memory (64k edges ~ 3.6 MB).
+//Comparison (2M edges, 7 alternating repetitions each, median):
+//   read everything first   1.303s   401.3 MB
+//   purely streaming        1.393s   219.4 MB
+//   streaming + 64k batch   1.301s   223.0 MB
 static const size_t BATCH_EDGES = 65536;
 
 struct batch_edge {
@@ -101,7 +104,7 @@ size_t readdb(const char* path, edge_handler on_edge) {
 		file.open(path);
 		if (!file.is_open()) {
 			cerr << "Cannot open input file: " << path << endl;
-			return 0;                 // 0 = 失败，见 readdb.h
+			return 0;                 // 0 = failure, see readdb.h
 		}
 		in = &file;
 		source = path;
@@ -110,12 +113,12 @@ size_t readdb(const char* path, edge_handler on_edge) {
 	clock_t s_time = clock();
 	if (DEBUG >= 1)
 		cout << "Reading similarity data from " << source
-		     << " (每条边边读边建结构)..." << endl;
+		     << " (one pass: parse and build together)..." << endl;
 
 	vector<batch_edge> batch;
 	batch.reserve(BATCH_EDGES);
 	size_t lineno = 0;
-	size_t n_read = 0;          // 已读入的边数
+	size_t n_read = 0;          // number of edges read so far
 	size_t n_skip = 0;
 	bool header_skipped = false;
 	bool warned_extra = false;
@@ -126,7 +129,7 @@ size_t readdb(const char* path, edge_handler on_edge) {
 		lineno++;
 		if (!line.empty() && '\r' == line[line.size() - 1])
 			line.erase(line.size() - 1);
-		//跳过空行和注释行
+		//Skip blank lines and comments
 		if (string::npos == line.find_first_not_of(" \t"))
 			continue;
 		if ('#' == line[line.find_first_not_of(" \t")])
@@ -147,7 +150,7 @@ size_t readdb(const char* path, edge_handler on_edge) {
 
 		double sim = 0;
 		if (!parse_sim(f[2], sim)) {
-			//只允许文件开头的第一行是表头，其余一律报错
+			//Only the very first line may be a header; anything else is an error
 			if (!header_skipped && 0 == n_read && is_header(f)) {
 				header_skipped = true;
 				if (DEBUG >= 1)
@@ -163,21 +166,22 @@ size_t readdb(const char* path, edge_handler on_edge) {
 			n_skip++;
 			continue;
 		}
-		//自环（对角线单元）会破坏"始终保证 group1 < group2"的前提，直接丢弃
+		//A self-loop (diagonal cell) would break the "group1 < group2" invariant,
+		//so it is dropped
 		if (f[0] == f[1]) {
 			cerr << "Line " << lineno << ": self-pair \"" << f[0] << "\"; skipped." << endl;
 			n_skip++;
 			continue;
 		}
 
-		//先攒进一小批（字符串 move 进去，不拷贝）
+		//Accumulate into a small batch first (names are moved in, not copied)
 		batch_edge be;
 		be.obj1 = std::move(f[0]);
 		be.obj2 = std::move(f[1]);
 		be.sim = sim;
 		batch.push_back(std::move(be));
 		if (batch.size() >= BATCH_EDGES) {
-			//读满一批，统一交给回调建结构
+			//Batch is full: hand it to the callback to build the structure
 			for (size_t k = 0; k < batch.size(); k++)
 				on_edge(std::move(batch[k].obj1), std::move(batch[k].obj2), batch[k].sim);
 			batch.clear();
@@ -187,7 +191,7 @@ size_t readdb(const char* path, edge_handler on_edge) {
 			cout << "\t" << n_read << " records read." << endl;
 	}
 
-	//冲掉最后不足一批的
+	//Flush the final partial batch
 	for (size_t k = 0; k < batch.size(); k++)
 		on_edge(std::move(batch[k].obj1), std::move(batch[k].obj2), batch[k].sim);
 	batch.clear();

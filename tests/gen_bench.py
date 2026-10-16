@@ -1,32 +1,35 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2022-2026 Ryan Ma <pningma@sina.com>
 """
-基准输入的**固定生成器**。
+The **fixed generator** for benchmark inputs.
 
-为什么必须固定：运行时强烈依赖相似度分布 —— 同样的对象数和边数，
-值域取 0..100（大部分边低于阈值、合并少）与取 1..65535（几乎全部参与合并）
-实测能差 3 倍以上。换一个随机种子或值域，前后两次的数字就不可比了。
+Why it must be fixed: runtime depends strongly on the similarity distribution. With the
+same object and edge counts, a range of 0..100 (most edges below the threshold, few
+merges) and 1..65535 (almost everything merges) measured over 3x apart. Change the seed
+or the range and the figures from before and after are not comparable. So the parameters
+are pinned below, and the numbers in tests/bench_baseline.txt are only comparable while
+they stay the same; changing them requires re-recording the baseline
+(python3 tests/bench.py --update).
 
-所以：参数写死在下面，`tests/bench_baseline.txt` 里的数字只在参数不变时可比。
-要改参数就必须重新生成基线（`python3 tests/bench.py --update`）。
-
-用法:
-    python3 tests/gen_bench.py <case> > /tmp/case.csv     # 生成某个用例
-    python3 tests/gen_bench.py --list                      # 列出全部用例
-    python3 tests/gen_bench.py --all <dir>                 # 全部生成到目录
+Usage:
+    python3 tests/gen_bench.py <case> > /tmp/case.csv     # generate one case
+    python3 tests/gen_bench.py --list                      # list all cases
+    python3 tests/gen_bench.py --all <dir>                 # generate all into a directory
 """
 
 import os
 import random
 import sys
 
-# (名字, 对象数n, 平均度deg, sim 最小值, sim 最大值, 种子)
-# 边数 ≈ n * deg / 2。值域上界受读取端限制：sim ∈ [0, 65535]。
+# (name, objects n, mean degree deg, sim min, sim max, seed)
+# edges ~ n * deg / 2. The upper bound is the reader's limit: sim in [0, 65535].
 CASES = [
-    ("bench_small",  2000, 20,     1, 65535, 1),   # 快，用来做多次重复
-    ("bench_mid",   20000, 20,     1, 65535, 2),   # 大多数边都参与合并（重活）
-    ("bench_large", 50000, 20,     1, 65535, 3),   # 大一点，看规模趋势
-    ("bench_lowval", 20000, 20,    0,   100, 4),   # 大多数边低于阈值（轻活）
-    ("bench_single", 50000, 20,    1, 65535, 5),   # 单链接（Kruskal 路径）用
+    ("bench_small",  2000, 20,     1, 65535, 1),   # fast, used for many repetitions
+    ("bench_mid",   20000, 20,     1, 65535, 2),   # most edges merge (heavy)
+    ("bench_large", 50000, 20,     1, 65535, 3),   # larger, to see the scaling trend
+    ("bench_lowval", 20000, 20,    0,   100, 4),   # most edges below the threshold (light)
+    ("bench_single", 50000, 20,    1, 65535, 5),   # for single linkage (the Kruskal path)
 ]
 
 
@@ -34,16 +37,17 @@ def case_params(name):
     for c in CASES:
         if c[0] == name:
             return c
-    raise SystemExit(f"未知用例 {name!r}；用 --list 看可用的")
+    raise SystemExit(f"unknown case {name!r}; use --list to see the available ones")
 
 
 def generate(name):
-    """生成边表文本（对象名 o<i>，pair 按字典序排序，保证逐位可复现）。"""
+    """Generate edge-list text (objects named o<i>, pairs sorted, so it is reproducible)."""
     _, n, deg, lo, hi, seed = case_params(name)
     rng = random.Random(seed)
     target = n * deg // 2
     pairs = set()
-    # 用集合去重抽 pair；边数远小于 n^2 时这样最快也最稳
+    # Draw distinct pairs through a set: with far fewer edges than n^2 this is fastest
+    # and safest.
     while len(pairs) < target:
         a = rng.randrange(n)
         b = rng.randrange(n)
@@ -52,7 +56,7 @@ def generate(name):
         if a > b:
             a, b = b, a
         pairs.add((a, b))
-    # 值在生成 pair 之后再抽，这样"哪条边拿到哪个值"也是确定的
+    # Values are drawn after the pairs, so which edge gets which value is deterministic too.
     lines = []
     for i, j in sorted(pairs):
         lines.append(f"o{i},o{j},{rng.randint(lo, hi)}")
@@ -65,7 +69,8 @@ def main(argv):
         return 0
     if argv[1] == "--list":
         for name, n, deg, lo, hi, seed in CASES:
-            print(f"{name:<14} n={n:<7} deg={deg:<3} sim∈[{lo},{hi}] seed={seed:<3} 边数≈{n * deg // 2}")
+            print(f"{name:<14} n={n:<7} deg={deg:<3} sim in [{lo},{hi}] seed={seed:<3} "
+                  f"edges ~{n * deg // 2}")
         return 0
     if argv[1] == "--all":
         outdir = argv[2]

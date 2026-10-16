@@ -1,8 +1,8 @@
-# 构建产物
+# Build artifacts
 #
-# 注意：这些模式必须用前缀 / 锚定到仓库根！以前写的是裸 `spclust`，
-# 而 .gitignore 里不带斜杠的模式会匹配**任意层级的同名路径**，
-# 于是 include/spclust/ 整个目录被忽略了 —— 公开头文件从来没被提交过。
+# Note: these patterns must be anchored to the repository root with a leading /. A bare
+# `spclust` entry used to be here, and patterns without a slash match a path component at
+# **any depth**, so include/spclust/ was ignored entirely and the public header was never committed.
 /spclust
 /spclust-asan
 /spclust-linkage-*

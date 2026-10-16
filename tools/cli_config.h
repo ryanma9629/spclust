@@ -5,28 +5,32 @@
 #define SPCLUST_CLI_CONFIG_H
 
 // ---------------------------------------------------------------------------
-// 命令行工具自己的编译期选项。**这些不属于库** —— 库不打印、不读文件，
-// 也不规定相似度的取值范围（库接受任意有限非负 double）。
-// 全部用 #ifndef 包住，可以在命令行覆盖：make MIN_SIM=60 DEBUG=2
+// Compile-time options belonging to the command-line tool. **None of these are
+// part of the library**: the library does not print, does not read files, and
+// does not restrict the range of similarities (it accepts any finite
+// non-negative double).
+// They are all wrapped in #ifndef so the command line can override them:
+//     make MIN_SIM=60 DEBUG=2
 // ---------------------------------------------------------------------------
 
-//读取数据过程中调试信息显示频度
+// How often to print read progress
 #ifndef DEBUG_FREQ_READDB
 #define DEBUG_FREQ_READDB 10000
 #endif
 
-//切树的默认相似度位置（--cut 的默认值）
+// Default similarity at which to cut the tree (the default of --cut)
 #ifndef MIN_SIM_CLUST
 #define MIN_SIM_CLUST 50
 #endif
 
-//CLI 的输入契约：相似度必须在 [0, 65535] 内。这是历史遗留（原来是 unsigned short），
-//库本身没有这个上限；保留它是为了让读入端能挡住明显离谱的输入。
+// The CLI's input contract: similarity must be within [0, 65535]. This is
+// historical (it used to be an unsigned short) and the library has no such limit;
+// it is kept so the reader rejects obviously bogus input.
 #ifndef MAX_SIM_READ
 #define MAX_SIM_READ 65535
 #endif
 
-//调试信息级别：0=静默 1=阶段与进度 2=每次合并的细节
+// Debug level: 0 = silent, 1 = phases and progress, 2 = per-merge detail
 #ifndef DEBUG
 #define DEBUG 1
 #endif

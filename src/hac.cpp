@@ -15,9 +15,11 @@
 #include <vector>
 
 // ---------------------------------------------------------------------------
-// AddressSanitizer 内存毒化。节点池是手写 malloc 的，free 掉的槽位会被毒化，
-// 于是"读已释放节点"仍能被 ASan 抓到（这是节点池不能换成 std::vector 的原因之一）。
-// 注意：这些宏在**使用点**求 sizeof(sp_unit)，所以定义放在文件顶部也没问题。
+// AddressSanitizer memory poisoning. The node pool is hand-written malloc, so freed
+// slots are poisoned and "reading a released node" is still caught by ASan - one of
+// the reasons the pool cannot simply become a std::vector.
+// Note the macros take sizeof(sp_unit) at the point of use, so defining them at the
+// top of the file is fine.
 // ---------------------------------------------------------------------------
 #if defined(__SANITIZE_ADDRESS__)
 # define SPCLUST_ASAN 1
@@ -45,24 +47,28 @@ using namespace std;
 namespace spclust {
 namespace detail {
 
-//单元素组的"组内平均相似度"初值。
+//Initial "mean intra-cluster similarity" of a singleton group.
 //
-//average / max 的合并式里 0 是合适的初值；但 min 链接的合并式是 min(min(g1,g2), max_sim)，
-//0 是吸收元，会让紧致度报告恒为 0。单元素组本来就没有"组内边"，
-//它的初值应该是**空集的 +∞**，这样 min 才有意义。
+//0 is a fine initial value for the average/max recurrences, but the min recurrence is
+//min(min(g1,g2), max_sim) and 0 is an absorbing element there, which would make the
+//cohesion report identically 0. A singleton has no intra-cluster edge at all, so its
+//initial value should be the **+inf of the empty set**, and only then does min mean
+//anything.
 
-//聚类过程中保存相似性的节点。
+//The node that stores one similarity during clustering.
 //
-//四个链接和两个组号都存**下标**而不是指针，整个池是一块连续内存：
-//   sizeof(sp_unit) = 4*4(链接) + 2*4(组号) + 8(sim) = 32 字节（原来 48）
-//实测节点尺寸是一阶因素（把节点人为撑到 128 字节会慢 1.17x），所以这一压是值得的。
+//The four links and both group numbers are **indices**, not pointers, so the whole
+//pool is one contiguous block:
+//   sizeof(sp_unit) = 4*4(links) + 2*4(groups) + 8(sim) = 32 bytes (was 48)
+//Node size turned out to be a first-order factor (padding a node to 128 bytes costs
+//1.17x), so this compression is worth it.
 //
-//空链接用 0。0 号节点是**保留的空哨兵**，不参与任何链表 ——
-//这样 vec_dim1/vec_dim2 resize 时的值初始化（清零）天然就是"空"，
-//与原来 head/max 是裸指针时零初始化即 NULL 的行为一致。
+//An empty link is 0. Node 0 is a **reserved null sentinel** that belongs to no list,
+//so value-initialization (zeroing) of vec_dim1/vec_dim2 is naturally "empty" - the
+//same behaviour as when head/max were raw pointers and zero meant NULL.
 const uint32_t SP_NONE = 0;
 
-//—— 下面都是无状态的类型定义，三种链接方式共享 ——
+//-- Everything below is a stateless type definition shared by the three linkages --
 
 struct SimEntry {
 	double sim;
@@ -87,31 +93,34 @@ struct sp_unit {
 	uint32_t group2;
 	double sim;
 };
-//“左向量”中的元素
+//An element of the "row vector"
 struct p_dim1 {
 	uint32_t head;
 	uint32_t max;
 };
-//"顶向量“中的元素
+//An element of the "column vector"
 struct p_dim2 {
 	uint32_t head;
 };
-//聚类过程中的活组：组内平均相似度 + 成员数。
-//这里**不保存成员列表**：成员由合并树 + 调用方的 id->名字映射提供，
-//存列表只会白白复制（详见 README 的「已修复」）。
+//A live cluster during clustering: mean intra-cluster similarity + member count.
+//The member list is **not** stored here: members come from the merge tree plus the
+//caller's id-to-name mapping, and keeping a list would only duplicate memory.
 struct grp_s {
 	double sim;
 	std::size_t n_members;
 };
 
-//“左向量”，记录每个横向链的头、值最大节点
+//The "row vector": for every row, the head of its linked list and its largest element
 // ===========================================================================
-// 实现。原来这里是 34 个文件静态变量 + 静态函数 —— 一个进程只能跑一次聚类。
-// 现在整个搬进一个结构体，于是：
-//   * 一个进程可以有任意多个（相互独立的）聚类；
-//   * 并行跑多个聚类不需要加锁（只要不共享同一个对象）；
-//   * 链接方式从编译期常量变成构造时给定的成员（原来是 #define LINKAGE_MTD）。
-// 全部内部符号都在 spclust::detail 里，头文件只前向声明 HACImpl。
+// The implementation. This used to be 34 file-static variables plus static functions,
+// which allowed exactly one clustering per process. All of it now lives in one struct,
+// so:
+//   * a process can run any number of independent clusterings;
+//   * running several in parallel needs no locking (as long as no object is shared);
+//   * the linkage is a member set at construction instead of a compile-time constant
+//     (it used to be #define LINKAGE_MTD).
+// Every internal symbol lives in spclust::detail; the header only forward-declares
+// HACImpl.
 // ===========================================================================
 struct HACImpl {
 	explicit HACImpl(Linkage mtd)
@@ -120,45 +129,46 @@ struct HACImpl {
 						 ? numeric_limits<double>::infinity() : 0.0) {}
 
 	const Linkage linkage;
-	// 单元素组的"组内平均相似度"初值。
+	// Initial "mean intra-cluster similarity" of a singleton group.
 	//
-	// average / max 的合并式里 0 是合适的初值；但 min 链接的合并式是
-	// min(min(g1,g2), max_sim)，0 是吸收元，会让紧致度报告恒为 0。单元素组本来
-	// 就没有"组内边"，初值应该是**空集的 +∞**，这样 min 才有意义。
+	// 0 is a fine initial value for the average/max recurrences, but the min recurrence is
+	// min(min(g1,g2), max_sim) and 0 is absorbing there, which makes the cohesion report
+	// identically 0. A singleton has no intra-cluster edge, so its init is the **+inf of the empty set**.
 	const double empty_cohesion;
 
 vector<p_dim1> vec_dim1;
-//“顶向量”，记录每个纵向链的头
+//The "column vector": for every column, the head of its (vertical) linked list
 vector<p_dim2> vec_dim2;
 
 // ---------------------------------------------------------------------------
-// 节点池。
+// The node pool.
 //
-// 所有单元放在一块连续内存里（下标寻址），释放的节点用空闲链表回收。
-// 换掉 malloc/free 本身几乎不省时间（实测 1.00x，见 README），**压小节点才省时间**：
-//   sizeof(sp_unit) 48 -> 32 字节
+// Every cell lives in one contiguous block (index-addressed); released nodes are recycled through a free list.
+// Replacing malloc/free itself saves almost nothing (measured 1.00x); **shrinking the node does**:
+//   sizeof(sp_unit) 48 -> 32 bytes
 //
-// ASan 的手工毒化：池里的内存在整个生命周期内都可访问，ASan 原本就看不见
-// "单元被释放之后又被读" —— 而那正是这个代码库里出现过两次的 bug 类型。
-// 所以释放时毒化该节点、分配时解除毒化，UAF 依然会被 ASan 抓到。
-// 池扩容换地址时，之前记在旧缓冲上的毒化标记会失效，按空闲链表重来一遍。
+// Manual ASan poisoning: the pool stays accessible for its whole lifetime, so ASan cannot see
+// "a cell was released and then read" on its own - the bug class that appeared twice here.
+// So a node is poisoned on release and unpoisoned on allocation, and use-after-free is still caught.
+// When the pool moves, poisoning recorded on the old buffer is invalidated and redone via the free list.
 // ---------------------------------------------------------------------------
-//池用 malloc/realloc 直接管，而不是 std::vector：vector 扩容要「新块 + 拷贝 + 释放旧块」，
-//而系统的分配器不会立刻把大块还给操作系统，于是每一次搬迁都留下一个常驻的中间块 ——
-//实测 800k 边时按 1.25 倍扩要 150 MB（总共 26 MB 的节点！），按 2 倍扩也要 85 MB。
-//realloc 对大块常常能原地扩张，既不拷贝也不产生中间块。
+//The pool uses malloc/realloc rather than std::vector: growing a vector means new block + copy + free old,
+//and the allocator does not return large blocks promptly, so every move leaves a resident intermediate block -
+//measured at 800k edges, growth by 1.25x costs 150 MB (for 26 MB of nodes total!), 2x costs 85 MB.
+//realloc can usually extend large blocks in place: no copy, no intermediate block.
 sp_unit* arena = NULL;
-size_t arena_cap = 0;    // 容量（节点数）
-size_t arena_used = 0;   // 已经分配出去过的下标数（含 0 号哨兵）
-//空闲下标单独存，不借用节点自己的字段 —— 否则遍历空闲表就要去读被毒化的节点，
-//而毒化正是为了抓住"读已释放节点"这件事。
+size_t arena_cap = 0;    // capacity in nodes
+size_t arena_used = 0;   // highest index ever handed out (including the 0 sentinel)
+//Free indices are stored separately rather than borrowed from the node's own fields -
+//otherwise walking the free list would read poisoned nodes, and the poisoning exists
+//precisely to catch that.
 vector<uint32_t> arena_free_list;
 size_t arena_live = 0;
 
 
 uint32_t node_alloc(void) {
 	if (0 == arena_used) {
-		arena = (sp_unit*)calloc(1, sizeof(sp_unit));   // 下标 0 保留为空哨兵，永不出借
+		arena = (sp_unit*)calloc(1, sizeof(sp_unit));   // index 0 is the null sentinel, never handed out
 		if (NULL == arena)
 			throw std::bad_alloc();
 		arena_cap = 1;
@@ -173,7 +183,8 @@ uint32_t node_alloc(void) {
 	}
 	if (arena_used == arena_cap) {
 		size_t want = arena_cap * 2;
-		//realloc 可能搬家，而搬家要读旧内容 —— 其中可能有被毒化的空闲节点，先整片解除
+		//realloc may move the block, and moving reads the old contents - which may
+		//include poisoned free nodes, so unpoison the whole block first
 		SP_UNPOISON_RANGE(arena, arena_used * sizeof(sp_unit));
 		sp_unit* p = (sp_unit*)realloc(arena, want * sizeof(sp_unit));
 		if (NULL == p)
@@ -194,33 +205,38 @@ void node_free(uint32_t i) {
 }
 
 
-// merge_grp 每次只需重算“与 group1/group2 相邻的那些行/列”，即 O(degree) 个下标，
-// 但旧实现为此要扫描整个索引空间三次（两趟更新 + 一趟 max 修复）：实测这三次
-// O(n) 全量扫描占了聚类段约 75% 的时间，而且每次合并还要新分配 3 个 O(n) 向量。
-// 下面这几个缓冲跨合并复用，只复位本次触及过的位置，于是每步都是 O(degree)。
-vector<unsigned char> mark_flags;  // 位0=要重算相似度, 位1=max失效, 位2/位3=已记下对 group1/group2 的相似度
-vector<size_t> updated;            // 需要重算相似度的下标（行号或列号）
-vector<size_t> dirty_max;          // max 指针失效、需要重扫的行
-vector<size_t> touched;            // 本次置过位的位置，用于 O(k) 复位
+// merge_grp only has to recompute the rows/columns adjacent to group1/group2, which is
+// O(degree) indices, but the old implementation scanned the whole index space three
+// times to find them (two update passes plus one max repair): those three O(n) sweeps
+// were about 75% of the clustering phase, and each merge also allocated three fresh
+// O(n) vectors. The buffers below are reused across merges and only reset at the
+// positions actually touched, so every step is O(degree).
+vector<unsigned char> mark_flags;  // bit0=recompute similarity, bit1=max invalid, bit2/bit3=similarity to group1/group2 recorded
+vector<size_t> updated;            // indices (row or column) whose similarity must be recomputed
+vector<size_t> dirty_max;          // rows whose max pointer is invalid and must be rescanned
+vector<size_t> touched;            // positions whose bit was set, for O(k) reset
 
-//合并树。每次成功合并一对就追加一条 —— 这就是层次聚类的完整输出，
-//阈值（--cut / cut()）只是切树的位置，不再是停止条件。
+//The merge tree: one row appended per successful merge. This is the complete output of
+//the hierarchical clustering; the threshold (--cut / cut()) is only where the tree is
+//cut, no longer a stopping condition.
 vector<Merge> merges;
 size_t n_objects = 0;
 
-//本次合并中，下标 x 到 group1 / group2 的相似度。相似度非负（读取端限制 [0,65535]），
-//所以 -1 可以安全地表示"没有这条边"。
+//Similarity from index x to group1 / group2 in the current merge. Similarities are
+//non-negative, so -1 safely means "there is no such edge".
 //
-//为什么要缓存这两个值：更新每个下标原本要调两次 get_unit()，而 get_unit() 是沿链线性查找，
-//实测占整个程序约一半时间。但这两条边本来就在我们已经遍历的那 4 条链上 ——
-//对下标 x，S(x, group1) 这个单元在 x > group1 时位于"行 group1"链上，
-//x < group1 时位于"列 group1"链上；对 group2 同理。收集阶段顺手记下来，更新阶段就
-//完全不需要 get_unit() 了。代价是两张 O(组数) 的 double 表，且只复位本次触及过的位置。
+//Why cache these two values: updating one index used to call get_unit() twice, and
+//get_unit() is a linear walk along a chain that measured about half of the whole
+//program's time. But those two edges are already on the four chains we traverse anyway:
+//for index x, the cell S(x, group1) sits on the "row group1" chain when x > group1 and on
+//the "column group1" chain when x < group1, and likewise for group2. Recording them
+//during the collection phase removes get_unit() from the update phase entirely. The cost
+//is two O(number of groups) double arrays, reset only where they were touched.
 vector<double> sim_g1;
 vector<double> sim_g2;
 
 
-//给下标 x 置一位；返回 true 表示这一位本次第一次置上
+//Set one bit for index x; returns true when this bit was the first one set this round
 bool set_flag(size_t x, unsigned char bit) {
 	if (x >= mark_flags.size()) {
 		mark_flags.resize(x + 1, 0);
@@ -228,21 +244,22 @@ bool set_flag(size_t x, unsigned char bit) {
 		sim_g2.resize(x + 1, -1.0);
 	}
 	if (0 == mark_flags[x])
-		touched.push_back(x);          // 登记以便本次结束时 O(k) 复位
+		touched.push_back(x);          // record it so the round can reset in O(k)
 	bool fresh = (0 == (mark_flags[x] & bit));
 	mark_flags[x] |= bit;
 	return fresh;
 }
 
-//标记下标 x “需要重算相似度”；返回 true 表示这是本次第一次标记（顺带去重）
+//Mark index x as needing a similarity recomputation; true means this is the first such mark (dedup)
 bool mark_updated(size_t x) { return set_flag(x, F_UPDATED); }
 
-//标记下标 x 的 max 指针失效
+//Mark index x's max pointer as invalid
 bool mark_dirty_max(size_t x) { return set_flag(x, F_DIRTY_MAX); }
 
-//记录下标 x 到 group1 / group2 的相似度。**首次写入生效**：get_unit() 是沿链从头部
-//（add_grp 头插，即最后插入的单元）找第一个匹配，首次写入对应同一个单元，
-//所以重复 pair 的输入下行为也保持一致。
+//Record the similarity from index x to group1 / group2. **The first write wins**:
+//get_unit() walks the chain from the head (add_grp inserts at the head, i.e. the last
+//cell inserted) and takes the first match, so the first write corresponds to the same
+//cell - which keeps behaviour identical for inputs with duplicate pairs.
 void record_sim_g1(size_t x, double v) {
 	set_flag(x, F_SIM_G1);
 	if (sim_g1[x] < 0)
@@ -255,30 +272,40 @@ void record_sim_g2(size_t x, double v) {
 }
 
 // ---------------------------------------------------------------------------
-// 全局最大相似度：最大堆 + 版本号懒删除。
+// The global maximum similarity: a max-heap with version-number lazy deletion.
 //
-// P0-1 之后 get_max() 那次 O(组数) 扫描已经是聚类段 57~78% 的时间，换成堆后是 O(1)。
+// After the earlier optimisation, get_max()'s O(number of groups) sweep was 57-78% of
+// the clustering phase; with a heap it is O(1).
 //
-// 关键设计：**把 key 冻结在堆项里**（sim 存进项里，不实时去 vec_dim1[row].max 读）。
-// 这一点是必须的：如果 key 实时读，一次合并里改掉 k 行的 key 之后，堆数组的次序就
-// 与当前 key 不再对应，堆序被破坏；而 sift_up/sift_down 都假定“除待修的那一处之外
-// 处处是有效堆”，所以逐个就地 sift 并不能把它修回来（这一点是实测踩出来的）。
+// Key design point: **the key is frozen inside the heap entry** (the similarity is
+// stored in the entry rather than read live from vec_dim1[row].max). This is
+// mandatory: with a live key, changing k rows' keys during one merge leaves the heap
+// array's order no longer matching the current keys, so the heap invariant breaks -
+// and sift_up/sift_down both assume "the heap is valid everywhere except the one place
+// being repaired", so sifting each position in place cannot restore it. That one was
+// found by measurement.
 //
-// 行内 max 变化时就推进该行版本号并压入新项，旧项靠版本号作废。带来的好处：
-//   * 不需要任何“项在堆里的位置”簿记，也不需要让更新幂等
-//   * 不依赖调用顺序，可以在 add_grp / 摘除 / max 重扫处就地维护
-//   * 堆操作完全不碰 vec_dim1，所以合并中途那些暂时悬垂的 max 指针与堆无关
-// 作废项堆积超过活行数的若干倍时重建一次（每个活行只留一项），内存仍是 O(n)，
-// 并且重建只按堆自身大小做，摊还 O(1)。
+// When a row's max changes, its version is bumped and a new entry is pushed; old entries
+// are invalidated by their version. The benefits:
+//   * no bookkeeping of "where an entry sits in the heap" is needed, and updates need not
+//     be idempotent;
+//   * it does not depend on call order, so it can be maintained in place in add_grp, in
+//     removal, and in the max rescan;
+//   * heap operations never touch vec_dim1, so the max pointers that dangle temporarily
+//     mid-merge are irrelevant to the heap.
+// Once invalidated entries outnumber live rows by a factor, the heap is rebuilt with one
+// entry per live row: memory stays O(n) and the rebuild costs O(heap size), i.e. O(1)
+// amortised.
 // ---------------------------------------------------------------------------
 
 vector<SimEntry> heap;
-vector<size_t> row_version;   // 每行的当前版本号
-vector<char> row_live;        // 该行当前是否非空（用于控制重建阈值）
+vector<size_t> row_version;   // current version number of each row
+vector<char> row_live;        // whether the row is currently non-empty (drives the rebuild threshold)
 size_t live_rows = 0;
 
-//堆序：先比相似度，相等时行号小的算“更大”。
-//这与旧实现“i 升序扫描、只在严格大于当前最大值时接管”的并列行为一致。
+//Heap order: compare similarity first; on a tie the smaller row index counts as
+//"larger". This reproduces the old implementation's tie behaviour (ascending i scan,
+//taking over only on a strictly greater value).
 static bool entry_less(const SimEntry& a, const SimEntry& b) {
 	if (a.sim != b.sim)
 		return a.sim < b.sim;
@@ -316,8 +343,9 @@ void heap_sift_down(size_t i) {
 	}
 }
 
-//行 row 的 max 变了（也可能变成空）：推进版本号；非空则压入新项。
-//**每一处写 vec_dim1[*].max 的地方都必须调用它**，否则那一行会被漏掉。
+//Row `row`'s max changed (it may have become empty): bump the version and, if still
+//non-empty, push a new entry. **Every place that writes vec_dim1[*].max must call
+//this**, otherwise that row is silently skipped.
 void note_row_changed(size_t row) {
 	if (row >= row_version.size()) {
 		row_version.resize(row + 1, 0);
@@ -331,7 +359,7 @@ void note_row_changed(size_t row) {
 		live_rows += live ? 1 : -1;
 	}
 	if (!live)
-		return;                      // 变空：只让旧项作废
+		return;                      // became empty: just invalidate the old entry
 
 	SimEntry e;
 	e.sim = arena[vec_dim1[row].max].sim;
@@ -340,8 +368,9 @@ void note_row_changed(size_t row) {
 	heap.push_back(e);
 	heap_sift_up(heap.size() - 1);
 
-	//作废项堆得太多就重建：只保留每个活行的当前项，然后 Floyd 建堆。
-	//重建代价按堆自身大小算，所以相对压入次数是摊还 O(1)，内存也稳定在 O(活行数)。
+	//Too many invalidated entries: rebuild, keeping only each live row's current entry,
+	//then Floyd heapify. The cost scales with the heap size, so it is O(1) amortised
+	//against the number of pushes and memory stays O(live rows).
 	if (heap.size() > 4 * live_rows + 64) {
 		vector<SimEntry> fresh;
 		fresh.reserve(heap.size());
@@ -356,46 +385,46 @@ void note_row_changed(size_t row) {
 	}
 }
 
-//聚类过程中的活组表。
-//以前它定义在 main.cpp、这里用 extern 串起来；现在收进本文件（main.cpp 已经不读它了）。
+//The table of live clusters. It used to be defined in main.cpp and wired up here with
+//extern; it now lives in this object (the CLI no longer reads it).
 vector<grp_s> grp;
 
-//将一个(group1, group2, sim)的节点加入结构，每次加入所在链表的头位置
+//Insert a (group1, group2, sim) cell into the structure, always at the head of its list
 uint32_t add_grp(size_t group1, size_t group2, double sim) {
-	//始终保证group1小于group2
+	//group1 is always kept smaller than group2
 	if (group1 > group2)
 		swap(group1, group2);
 
-	//”左向量“和”顶向量“扩容
+	//grow the row vector and the column vector
 	if (vec_dim1.size() <= group1)
 		vec_dim1.resize(group1 + 1);
 	if (vec_dim2.size() <= group2)
 		vec_dim2.resize(group2 + 1);
 
-	//待加入的节点（从池里取下标）
+	//the cell to insert (take an index from the pool)
 	uint32_t unit = node_alloc();
-	//一次性赋值（字段顺序见 main.h 的 sp_unit）：编译器会合成少量宽的写，
-	//比 7 次分散的字段写省几条指令。
+	//Assign once (field order matches sp_unit): the compiler emits a few wide stores,
+	//saving instructions over seven scattered field writes.
 	arena[unit] = sp_unit{ SP_NONE, SP_NONE, SP_NONE, SP_NONE,
 		(uint32_t)group1, (uint32_t)group2, sim };
 
-	//如果该行的max不存在或者比待加入的节点小，更新”左向量“的max指针
+	//If this row has no max yet or the new cell is larger, update the row vector's max pointer
 	if (SP_NONE == vec_dim1[group1].max || arena[vec_dim1[group1].max].sim < sim) {
 		vec_dim1[group1].max = unit;
 		note_row_changed(group1);
 	}
 
-	//原来的横向链表头
+	//the previous row-list head
 	uint32_t prev_head = vec_dim1[group1].head;
-	//新加入的节点成为链表头
+	//the new cell becomes the list head
 	vec_dim1[group1].head = unit;
-	//如果原链表头存在，右移一个位置，更新原链表头和新节点之间的链接关系
+	//If there was a previous head, shift it right and relink it behind the new cell
 	if (SP_NONE != prev_head) {
 		arena[unit].right = prev_head;
 		arena[prev_head].left = unit;
 	}
 
-	//原来的纵向链表头，余同上
+	//the previous column-list head; the rest is as above
 	prev_head = vec_dim2[group2].head;
 	vec_dim2[group2].head = unit;
 	if (SP_NONE != prev_head) {
@@ -405,9 +434,9 @@ uint32_t add_grp(size_t group1, size_t group2, double sim) {
 	return unit;
 }
 
-//获取全局结构中值最大的节点（堆顶，摊还 O(1)）
+//Get the largest cell in the whole structure (the heap top, amortised O(1))
 uint32_t get_max(void) {
-	//丢掉被版本号作废的堆顶
+	//discard heap tops invalidated by their version
 	while (!heap.empty()) {
 		const SimEntry& e = heap[0];
 		if (e.row < row_version.size() && e.version == row_version[e.row])
@@ -420,22 +449,23 @@ uint32_t get_max(void) {
 	if (heap.empty())
 		return SP_NONE;
 	uint32_t unit = vec_dim1[heap[0].row].max;
-	//与原实现一致：相似度为 0 不算候选（原实现用 max 初值 0 + 严格 > 来筛）。
-	//堆里放着所有非空行，所以堆顶 <= 0 就意味着不存在正相似度的候选。
+	//As in the original: similarity 0 is not a candidate (the original filtered with a
+	//max initialised to 0 plus a strict >). The heap holds every non-empty row, so a top
+	//<= 0 means no candidate with positive similarity exists.
 	if (SP_NONE == unit || !(arena[unit].sim > 0))
 		return SP_NONE;
 	return unit;
 }
 
-//根据(group1, group2, sim)定位该节点
+//Locate the (group1, group2, sim) cell
 uint32_t get_unit(size_t group1, size_t group2) {
-	//始终保证group1小于group2
+	//group1 is always kept smaller than group2
 	if (group1 > group2)
 		swap(group1, group2);
-	//如果越界
+	//Out of range
 	if (group1 >= vec_dim1.size() || group2 >= vec_dim2.size())
 		return SP_NONE;
-	//沿着vec_dim1中group1那一行链表遍历节点
+	//Walk the row list of group1 in vec_dim1
 	uint32_t unit = vec_dim1[group1].head;
 	while(SP_NONE != unit) {
 		if (group2 == arena[unit].group2)
@@ -447,18 +477,23 @@ uint32_t get_unit(size_t group1, size_t group2) {
 }
 
 // ---------------------------------------------------------------------------
-// 单链接（Linkage::MaxSimilarity）走 Kruskal，完全不建稀疏结构。
+// Single linkage (Linkage::MaxSimilarity) goes through Kruskal and never builds the sparse structure.
 //
-// 单链接的簇间相似度 = 两个簇之间所有**原始边**的最大值（max 不稀释），
-// 所以整棵合并树等价于"把边按相似度降序排序，再用并查集逐个合并"（Kruskal / MST）。
+// Under single linkage the inter-cluster similarity is the maximum over all **original
+// edges** between two clusters (the max is not diluted), so the whole merge tree is
+// equivalent to "sort the edges by similarity descending and merge with a union-find"
+// (Kruskal / MST).
 //
-// 这避开了原本的稠密化：max 不稀释 => 簇级相似度图会变成原图的**传递闭包**，
-// n=40000 / 400k 边实测要建 93,418,345 个单元（是边数的 234 倍），7.35 s。
-// Kruskal 只用 m 条边加一次排序。
+// That avoids the densification the original suffered: the max is not diluted, so the
+// cluster-level similarity graph becomes the **transitive closure** of the input graph -
+// measured at n=40000 with 400k edges it built 93,418,345 cells (234x the edge count) in
+// 7.35 s. Kruskal uses m edges plus one sort.
 //
-// 并列（相似度相同的多条边）下合并**顺序**可能与贪心实现不同，但单链接在两个实现里
-// 都等于"只保留 sim >= X 的边之后各连通分量"，与顺序无关；所以任何阈值处切出来的
-// 分组、以及每个簇的紧致度（簇内最大边）都完全一致。
+// With ties (several edges of equal similarity) the merge **order** may differ from the
+// greedy implementation, but under single linkage both implementations amount to "the
+// connected components of the graph restricted to edges with sim >= X", which does not
+// depend on the order. So the groups at any threshold, and each cluster's cohesion (the
+// maximum intra-cluster edge), are identical.
 // ---------------------------------------------------------------------------
 
 vector<krusk_edge> krusk_edges;
@@ -466,15 +501,15 @@ vector<uint32_t> krusk_parent;
 
 static bool krusk_order(const krusk_edge& x, const krusk_edge& y) {
 	if (x.sim != y.sim)
-		return x.sim > y.sim;      // 相似度降序
+		return x.sim > y.sim;      // similarity descending
 	if (x.a != y.a)
-		return x.a < y.a;          // 并列时按 id 定序，只为了确定性
+		return x.a < y.a;          // break ties by id, purely for determinism
 	return x.b < y.b;
 }
 
 uint32_t krusk_find(uint32_t x) {
 	while (krusk_parent[x] != x) {
-		krusk_parent[x] = krusk_parent[krusk_parent[x]];   // 路径减半
+		krusk_parent[x] = krusk_parent[krusk_parent[x]];   // path halving
 		x = krusk_parent[x];
 	}
 	return x;
@@ -484,7 +519,8 @@ void clust_kruskal(double floor) {
 	sort(krusk_edges.begin(), krusk_edges.end(), krusk_order);
 
 	const size_t n = n_objects;
-	//集合的代表就是"代表这个簇的节点 id"：初始是对象自己，每次合并产生 n+i
+	//A set's representative is the node id representing that cluster: initially the object
+	//itself, and every merge produces n+i
 	krusk_parent.resize(n);
 	for (size_t i = 0; i < n; i++)
 		krusk_parent[i] = (uint32_t)i;
@@ -495,23 +531,23 @@ void clust_kruskal(double floor) {
 	for (size_t i = 0; i < krusk_edges.size(); i++) {
 		const krusk_edge& e = krusk_edges[i];
 		if (e.sim < floor || !(e.sim > 0))
-			break;                  // 到 floor 了（或没有正相似度的边了）
+			break;                  // reached floor (or no edge with positive similarity left)
 		uint32_t ra = krusk_find(e.a);
 		uint32_t rb = krusk_find(e.b);
 		if (ra == rb)
-			continue;               // 已经在同一个簇里（重复边或成环）
+			continue;               // already in the same cluster (duplicate edge or cycle)
 
 		uint32_t node = (uint32_t)next_id++;
 		Merge rec;
 		rec.left = ra;
 		rec.right = rb;
 		rec.similarity = e.sim;
-		//紧致度 = 簇内最大边 = 原来的 max(max(g1,g2), max_sim)
+		//cohesion = the maximum intra-cluster edge = the old max(max(g1,g2), max_sim)
 		rec.cohesion = max(max(cohesion_of[ra], cohesion_of[rb]), e.sim);
 		rec.size = size_of[ra] + size_of[rb];
 		merges.push_back(rec);
 
-		//两个集合的代表都指向新节点
+		//both set representatives point at the new node
 		krusk_parent[ra] = node;
 		krusk_parent[rb] = node;
 		krusk_parent.push_back(node);
@@ -521,21 +557,22 @@ void clust_kruskal(double floor) {
 	}
 }
 
-//喂一条边。库里**不存对象名**：id 由调用方给（约定是稠密的 0..n-1），
-//出现新 id 就登记成一个新的单元素组。
+//Feed one edge. The library **stores no object names**: ids come from the caller (they
+//are expected to be dense 0..n-1), and a new id is registered as a new singleton group.
 void add_edge(uint32_t a, uint32_t b, double sim) {
-	//自环会破坏内部"行号 < 列号"的前提（add_grp 的所有逻辑都建立在这上面）
+	//A self-loop would break the internal "row < column" premise that all of add_grp relies on
 	if (a == b)
 		throw std::invalid_argument("spclust::add_edge: self-loop is not supported");
-	//相似度必须是有限的非负数；用 !(sim >= 0.0) 可以一并挡掉 NaN
+	//Similarity must be finite and non-negative; !(sim >= 0.0) also rejects NaN
 	if (!(sim >= 0.0))
 		throw std::invalid_argument("spclust::add_edge: similarity must be finite and non-negative");
 	if (a > b)
 		swap(a, b);
 
 	if (grp.size() <= b) {
-		//新出现的 id 登记成单元素组。调用方如果跳号（稀疏 id），
-		//中间那些槽位也会成为"没有边的对象" —— 见头文件里的 id 约定。
+		//A new id is registered as a singleton group. If the caller skips ids (sparse
+		//ids), the slots in between also become objects with no edges - see the id
+		//contract in the header.
 		size_t old_size = grp.size();
 		grp.resize((size_t)b + 1);
 		for (size_t i = old_size; i <= b; i++) {
@@ -545,55 +582,58 @@ void add_edge(uint32_t a, uint32_t b, double sim) {
 	}
 
 	if (Linkage::MaxSimilarity == linkage) {
-		//单链接不需要稀疏结构，只攒边表（后面走 Kruskal）。这一支是编译期常量，
-		//所以 add_grp 那条路根本不会被执行到。
+		//Single linkage does not need the sparse structure, only an edge list (Kruskal
+		//comes later). The branch is a constant per instance, so the add_grp path is
+		//never reached.
 		krusk_edge e;
 		e.a = a;
 		e.b = b;
 		e.sim = sim;
 		krusk_edges.push_back(e);
 	} else
-		//把组信息而不是对象信息加入全局结构
+		//insert group information (not object information) into the structure
 		add_grp(a, b, sim);
 }
 
 size_t merge_grp(size_t group1, size_t group2, double max_sim) {
-	//“左向量”的长度，由于把两个组合并过程中该向量长度会改变，用dim1_size记录合并前的长度，不能用vec_dim1.size()
+	//The row-vector length changes while the two groups are being merged, so record the
+	//pre-merge length in dim1_size rather than using vec_dim1.size()
 	size_t dim1_size = vec_dim1.size();
-	//聚合之前group1和group2两组的对象个数
+	//member counts of group1 and group2 before merging
 	size_t group1_size = grp[group1].n_members;
 	size_t group2_size = grp[group2].n_members;
-	//”分组向量“的长度
+	//length of the group vector
 	size_t grp_size = grp.size();
 
-	//收集需要重算相似度的行/列，以及 max 指针失效的行。只遍历被标记的下标。
+	//Collect the rows/columns whose similarity must be recomputed, plus the rows whose max
+	//pointer is invalid. Only marked indices are visited.
 
-	//所有形如(group1, ..., ...)链上节点所在的列都需要更新
+	//Every column holding a cell of the (group1, ...) chain needs updating
 	uint32_t unit = vec_dim1[group1].head;
 	while (SP_NONE != unit) {
 		if (group2 != arena[unit].group2) {
-			record_sim_g1(arena[unit].group2, arena[unit].sim);   // 单元(group1,x) 就是 S(x,group1)
+			record_sim_g1(arena[unit].group2, arena[unit].sim);   // cell (group1,x) is S(x,group1)
 			if (mark_updated(arena[unit].group2))
 				updated.push_back(arena[unit].group2);
 		}
 		unit = arena[unit].right;
 	}
 
-	//所有形如(group2, ..., ...)链上节点所在的列都需要更新，如果该链存在
+	//Every column holding a cell of the (group2, ...) chain needs updating, if that chain exists
 	if (dim1_size > group2) {
 		unit = vec_dim1[group2].head;
 		while (SP_NONE != unit) {
-			record_sim_g2(arena[unit].group2, arena[unit].sim);   // 单元(group2,x) 就是 S(x,group2)
+			record_sim_g2(arena[unit].group2, arena[unit].sim);   // cell (group2,x) is S(x,group2)
 			if (mark_updated(arena[unit].group2))
 				updated.push_back(arena[unit].group2);
 			unit = arena[unit].right;
 		}
 	}
 
-	//所有形如(..., group1, ...)链上节点所在的行都需要更新
+	//Every row holding a cell of the (..., group1, ...) chain needs updating
 	unit = vec_dim2[group1].head;
 	while (SP_NONE != unit) {
-		record_sim_g1(arena[unit].group1, arena[unit].sim);       // 单元(x,group1) 就是 S(x,group1)
+		record_sim_g1(arena[unit].group1, arena[unit].sim);       // cell (x,group1) is S(x,group1)
 		if (mark_updated(arena[unit].group1))
 			updated.push_back(arena[unit].group1);
 		if (unit == vec_dim1[arena[unit].group1].max && mark_dirty_max(arena[unit].group1))
@@ -601,11 +641,11 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 		unit = arena[unit].down;
 	}
 
-	//所有形如(..., group2, ...)链上节点所在的行都需要更新
+	//Every row holding a cell of the (..., group2, ...) chain needs updating
 	unit = vec_dim2[group2].head;
 	while (SP_NONE != unit) {
 		if (group1 != arena[unit].group1) {
-			record_sim_g2(arena[unit].group1, arena[unit].sim);   // 单元(x,group2) 就是 S(x,group2)
+			record_sim_g2(arena[unit].group1, arena[unit].sim);   // cell (x,group2) is S(x,group2)
 			if (mark_updated(arena[unit].group1))
 				updated.push_back(arena[unit].group1);
 			if (unit == vec_dim1[arena[unit].group1].max && mark_dirty_max(arena[unit].group1))
@@ -614,21 +654,26 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 		unit = arena[unit].down;
 	}
 
-	//排成升序，保持与旧实现（两趟 for i = 0..dim 扫描标记）一致的处理顺序
-	//注意：这两个表每个合并要排一次，但元素不少 —— 实测平均 38 个
-	//（1,402,219 次迭代 / 36,564 次合并，n=80000）。曾经换成插入排序，结果整体慢 21%
-	//（O(k^2) 在 k≈38 时不划算）。别再把这里的 std::sort 换成小数组专用的排序。
+	//Sort ascending to keep the same processing order as the old implementation (two
+	//passes of for i = 0..dim over the marks).
+	//Note these two arrays are sorted once per merge and are not tiny - measured 38
+	//elements on average (1,402,219 iterations over 36,564 merges at n=80000). Switching
+	//to insertion sort made the whole program 21% slower (O(k^2) does not pay off at
+	//k ~ 38). Do not replace the std::sort here with a small-array sort again.
 	sort(updated.begin(), updated.end());
 
-	//重算这些下标到新组的相似度。
-	//旧实现分“行”和“列”两趟遍历，两趟的循环体逐字相同：对同一个下标 x，
-	//都是 get_unit(x, group1) 和 get_unit(x, group2)。所以 x 同时落在两趟里时，
-	//旧实现会为同一个 (x, grp_size) 调用两次 add_grp、插入两个数值相同的重复单元。
-	//合并成一趟后这些重复单元不再产生（用例 20_overlap_update.csv 就是这个配置）。
+	//Recompute these indices' similarity to the new group.
+	//The old implementation had two passes, one over rows and one over columns, with
+	//byte-identical loop bodies: for the same index x both do get_unit(x, group1) and
+	//get_unit(x, group2). So when x appeared in both passes, the old code called add_grp
+	//twice for the same (x, grp_size) and inserted two duplicate cells with equal values.
+	//Merging them into one pass removes those duplicates (case 20_overlap_update.csv is
+	//exactly that configuration).
 	for (size_t k = 0; k < updated.size(); k++) {
 		size_t i = updated[k];
-		//收集阶段已经把这 4 条链上的值顺手记下来了，这里直接读，不再做 get_unit() 的线性查找。
-		//-1 表示没有这条边，等价于原来的 get_unit 返回 NULL -> 0。
+		//The collection phase already recorded the values on those four chains, so read them
+		//directly instead of doing get_unit()'s linear walk. -1 means there is no such edge,
+		//equivalent to the old get_unit returning NULL -> 0.
 		double sim1 = (sim_g1[i] < 0) ? 0 : sim_g1[i];
 		double sim2 = (sim_g2[i] < 0) ? 0 : sim_g2[i];
 
@@ -638,11 +683,13 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 				(group1_size + group2_size);
 			if (sim > 0)
 				add_grp(i, grp_size, sim);
-		//MaxSimilarity（= 距离语义下的单链接）
+		//MaxSimilarity (= single linkage in distance terms)
 		} else if (Linkage::MaxSimilarity == linkage) {
-			//和另外两个分支一样，只留下 > 0 的候选。值为 0 意味着两个簇之间根本没有边，
-			//而 get_max() 本来就不会选相似度 <= 0 的单元，所以去掉这些单元不改变合并顺序，
-			//却能把矩阵从"每次合并都加满"变成保持稀疏 —— 实测 n=40000 时差 116 倍
+			//As in the other two branches, only candidates > 0 are kept. A value of 0 means
+			//there is no edge between the two clusters at all, and get_max() never picks a
+			//cell with similarity <= 0 anyway, so dropping them does not change the merge
+			//order - but it turns the matrix from "filled up on every merge" into a sparse
+			//one: measured 116x faster at n=40000
 			//（8.71s vs 0.075s）。
 			double sim = max(sim1, sim2);
 			if (sim > 0)
@@ -655,9 +702,9 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 	}
 
 	size_t new_grp = grp.size();
-	//”分组向量“扩容
+	//grow the group vector
 	grp.resize(new_grp + 1);
-	//扩容后的空间先存入group1内所有对象
+	//the new slot first receives all objects of group1
 	grp[new_grp].n_members = group1_size + group2_size;
 	if (Linkage::Average == linkage)
 		grp[new_grp].sim = (grp[group1].sim * group1_size * (group1_size - 1)
@@ -668,52 +715,52 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 	else if (Linkage::MinNonzero == linkage)
 		grp[new_grp].sim = min(min(grp[group1].sim, grp[group2].sim), max_sim);
 
-	//清除group1和group2两组内的对象
+	//clear the objects of group1 and group2
 	grp[group1].n_members = 0;
 	grp[group1].sim = 0;
 	grp[group2].n_members = 0;
 	grp[group2].sim = 0;
 
-	//定位(group1, group2, ...)这个点
+	//locate the (group1, group2, ...) cell
 	uint32_t unit_max = get_unit(group1, group2);
 	uint32_t tmp = SP_NONE;
 
-	//更新链表的链接关系
-	//删除(group1, ..., ...)一整行
+	//relink the lists
+	//remove the whole (group1, ...) row
 	unit = vec_dim1[group1].head;
 	while (SP_NONE != unit) {
-		//先不删除(group1,group2,sim)这个节点
+		//the (group1,group2,sim) cell itself is removed last
 		if (unit != unit_max) {
-			//如果该节点上方没有节点（列链表头）
+			//no cell above it (it is the head of the column list)
 			if (SP_NONE == arena[unit].up) {
-				//如果该节点下方也没有节点（列链表尾）
+				//and no cell below it either (it is the tail of the column list)
 				if (SP_NONE == arena[unit].down)
-					//该节点在列链表上是个孤立节点，直接把”顶向量“头记录清空
+					//the cell is alone in its column list: clear the column vector's head
 					vec_dim2[arena[unit].group2].head = SP_NONE;
 				else {
-					//”顶向量“的头记录更新
+					//update the column vector's head
 					vec_dim2[arena[unit].group2].head = arena[unit].down;
-					//该节点的下方节点变成整个列链表的头节点
+					//the cell below becomes the head of the column list
 					arena[arena[unit].down].up = SP_NONE;
 				}
 			} else {
-				//该节点的上方节点，直接向下链接该节点的下方节点
+				//the cell above links directly to the cell below
 				arena[arena[unit].up].down = arena[unit].down;
-				//如果该节点有下方节点
+				//if there is a cell below
 				if (SP_NONE != arena[unit].down)
-					//下方节点直接链接上方节点
+					//the lower cell links directly to the upper one
 					arena[arena[unit].down].up = arena[unit].up;
 			}
-			//把沿着横向的更新路径推进一个节点
+			//advance one cell along the row path
 			tmp = arena[unit].right;
-			//释放当前节点
+			//release the current cell
 			node_free(unit);
 			unit = tmp;
 		} else
 			unit = arena[unit].right;
 	}
 
-	//删除(group2, ..., ...)一整行，这行不一定存在需要先判断
+	//remove the whole (group2, ...) row; it may not exist, so check first
 	if (dim1_size > group2) {
 		unit = vec_dim1[group2].head;
 		while (SP_NONE != unit) {
@@ -735,7 +782,7 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 		}
 	}
 
-	//删除(..., group1, ...)一整列
+	//remove the whole (..., group1, ...) column
 	unit = vec_dim2[group1].head;
 	while (SP_NONE != unit) {
 		if (SP_NONE == arena[unit].left) {
@@ -755,7 +802,7 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 		unit = tmp;
 	}
 
-	//删除(..., group2, ...)一整列
+	//remove the whole (..., group2, ...) column
 	unit = vec_dim2[group2].head;
 	while (SP_NONE != unit) {
 		if (unit != unit_max) {
@@ -778,11 +825,11 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 			unit = arena[unit].down;
 	}
 
-	//最后删除(group1,group2,sim)节点
+	//finally remove the (group1,group2,sim) cell
 	node_free(unit_max);
 	unit_max = SP_NONE;
 	
-	//”左向量“中删除下标为group1,group2（如果存在）指针
+	//drop the group1/group2 entries from the row vector (if they exist)
 	vec_dim1[group1].head = SP_NONE;
 	vec_dim1[group1].max = SP_NONE;
 	note_row_changed(group1);
@@ -791,31 +838,33 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 		vec_dim1[group2].max = SP_NONE;
 		note_row_changed(group2);
 	}
-	//”顶向量“中删除下标为group1,group2的指针
+	//drop the group1/group2 entries from the column vector
 	vec_dim2[group1].head = SP_NONE;
 	vec_dim2[group2].head = SP_NONE;
 
-	//遍历需要修复 max 指针的行（升序），只遍历本次失效的那几行
+	//Walk the rows whose max pointer must be repaired, ascending, only those invalidated now
 	sort(dirty_max.begin(), dirty_max.end());
 	for (size_t k = 0; k < dirty_max.size(); k++) {
 		size_t i = dirty_max[k];
 		uint32_t u = vec_dim1[i].head;
 		uint32_t best = SP_NONE;
-		//从左到右遍历，找到最大值
+		//walk left to right and find the maximum
 		while (SP_NONE != u) {
 			if (SP_NONE == best || arena[u].sim > arena[best].sim)
 				best = u;
 			u = arena[u].right;
 		}
-		//必须无条件赋值。旧写法是 `if (arena[u].sim > max)`，max 初值 0，
-		//一旦整行相似度都是 0 就永远不会赋值，vec_dim1[i].max 会保留一个已经被 free 的指针，
-		//下一次 get_max() 就是 heap-use-after-free（见 tests/cases/22_zero_row_max.csv）。
-		//best 仍是“从左到右第一个取得最大值的单元”，并列行为与旧写法一致。
+		//This assignment must be unconditional. The old form was `if (arena[u].sim > max)`
+		//with max initialised to 0: if a whole row had similarity 0 it never assigned, and
+		//vec_dim1[i].max kept a pointer to freed memory, so the next get_max() was a
+		//heap-use-after-free (see tests/cases/22_zero_row_max.csv). `best` is still "the
+		//first cell left to right attaining the maximum", so ties behave as before.
 		vec_dim1[i].max = best;
 		note_row_changed(i);
 	}
 
-	//复位本次触及过的标记与缓存值。缓冲跨合并复用，所以这里既不再分配、也不清零整个 O(n) 内存。
+	//Reset the marks and cached values touched this round. The buffers are reused across
+	//merges, so nothing is allocated here and the whole O(n) memory is not cleared.
 	for (size_t k = 0; k < touched.size(); k++) {
 		mark_flags[touched[k]] = 0;
 		sim_g1[touched[k]] = -1.0;
@@ -828,10 +877,10 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 	return grp.size();
 }
 
-//释放结构占用内存
+//Release the memory used by the structure
 void free_mem(void) {
-	//节点池是一整块连续内存，整个还掉即可，不需要逐节点遍历释放。
-	//先把毒化标记整体解除，别把它们留给已经还给分配器的内存。
+	//The node pool is one contiguous block: hand it back whole, no per-node traversal.
+	//Unpoison everything first so no poisoning is left on memory returned to the allocator.
 	if (NULL != arena)
 		SP_UNPOISON_RANGE(arena, arena_used * sizeof(sp_unit));
 	free(arena);
@@ -842,7 +891,7 @@ void free_mem(void) {
 	vector<uint32_t>().swap(arena_free_list);
 	arena_live = 0;
 
-	//清除“左向量”和“顶向量”的指针
+	//clear the row and column vectors
 	for (size_t i = 0; i < vec_dim1.size(); i++) {
 		vec_dim1[i].head = SP_NONE;
 		vec_dim1[i].max = SP_NONE;
@@ -853,7 +902,7 @@ void free_mem(void) {
 	vec_dim1.clear();
 	vec_dim2.clear();
 
-	//合并过程中复用的缓冲也一并释放
+	//release the buffers reused during merging as well
 	mark_flags.clear();
 	sim_g1.clear();
 	sim_g2.clear();
@@ -870,42 +919,44 @@ void free_mem(void) {
 	live_rows = 0;
 }
 
-//算合并树。floor 是"树算到多低"的相似度下限（<=0 表示算完整棵树）。
+//Compute the merge tree. floor is the similarity below which merging stops (<= 0 means
+//compute the whole tree).
 void build(double floor) {
-	//初始组（对象）数 = 树的叶子数
+	//the initial number of groups (objects) = the number of leaves
 	n_objects = grp.size();
 
-	//id 空间上界是 2n-1（n 个对象 + 最多 n-1 次合并），一次分配好：
-	//热路径里的 set_flag/record_sim_* 就不用再在循环中 resize（那会触发 realloc，
-	//在 ASan 构建下还要重新处理毒化）。越界检查保留着，但它现在恒为假、几乎免费。
+	//The id space is bounded by 2n-1 (n objects plus at most n-1 merges), so allocate once:
+	//set_flag/record_sim_* in the hot path then never resize inside a loop (which would
+	//trigger realloc and, under ASan, more poisoning work). The bounds check is kept, but
+	//it is now always false and essentially free.
 	mark_flags.assign(2 * n_objects, 0);
 	sim_g1.assign(2 * n_objects, -1.0);
 	sim_g2.assign(2 * n_objects, -1.0);
 
 	if (Linkage::MaxSimilarity == linkage) {
-		//单链接：边按相似度降序 + 并查集，O(m log m)
+		//single linkage: edges sorted by similarity descending + union-find, O(m log m)
 		clust_kruskal(floor);
 		free_mem();
 		return;
 	}
 
 	size_t grp_size = grp.size();
-	//合并到最大相似度 < floor 为止。floor 由调用方给：
-	//  floor = 切树阈值  -> 成本与"直接在阈值处停下"完全一样
-	//  floor <= 0        -> 完整树，代价是多做很多次合并
+	//Merge until the largest similarity is below floor. floor comes from the caller:
+	//  floor = the cut threshold -> costs exactly the same as stopping at that threshold
+	//  floor <= 0                -> the full tree, at the cost of many more merges
 	while (grp_size > 1) {
 		uint32_t unit = get_max();
 		if (SP_NONE == unit)
-			break;                      // 没有正相似度的候选了，树到此到底
+			break;                      // no candidate with positive similarity: the tree ends here
 		double max_sim = arena[unit].sim;
 		if (max_sim < floor)
-			break;                      // 到 floor 了；想要更深的树就把 floor 调低
+			break;                      // reached floor; lower floor for a deeper tree
 		size_t group1 = arena[unit].group1;
 		size_t group2 = arena[unit].group2;
 		grp_size--;
 		size_t new_grp = merge_grp(group1, group2, max_sim) - 1;
 
-		//记录这次合并（组号即节点 id，见 include/spclust/hac.h 的 Merge）
+		//record this merge (the group number is the node id; see spclust::Merge)
 		Merge rec;
 		rec.left = (uint32_t)group1;
 		rec.right = (uint32_t)group2;
@@ -914,12 +965,12 @@ void build(double floor) {
 		rec.size = grp[new_grp].n_members;
 		merges.push_back(rec);
 	}
-	//聚类结束，释放结构占用内存
+	//clustering finished: release the structure's memory
 	free_mem();
 }
 
 // ---------------------------------------------------------------------------
-// 公开接口（见 include/spclust/hac.h）
+// Public API (see include/spclust/hac.h)
 // ---------------------------------------------------------------------------
 
 std::size_t num_objects() const {
@@ -940,25 +991,26 @@ const char* linkage_name() const {
 }
 
 void reserve(std::size_t n_objects_hint, std::size_t n_edges_hint) {
-	//只预留调用方明确知道的容量。节点池按需增长，不在这里一口气要一大块 ——
-	//池的容量策略对峰值内存影响很大（见 README）。
+	//Reserve only what the caller explicitly knows. The node pool grows on demand rather
+	//than taking one big block here - the pool's growth policy dominates peak memory.
 	grp.reserve(n_objects_hint);
 	merges.reserve(n_objects_hint);
 	krusk_edges.reserve(n_edges_hint);
 }
 
-//切树用的并查集。父数组由调用方持有 —— 原来它是文件静态量，于是同一进程里并发
-//切树会互相踩（而且 cut() 名义上是 const 却改了全局状态）。
+//Union-find used for cutting. The parent array belongs to the caller - it used to be a
+//file static, so concurrent cuts in one process stepped on each other (and cut() was
+//nominally const while mutating global state).
 static std::size_t uf_find(std::vector<std::size_t>& parent, std::size_t x) {
 	while (parent[x] != x) {
-		parent[x] = parent[parent[x]];   // 路径减半
+		parent[x] = parent[parent[x]];   // path halving
 		x = parent[x];
 	}
 	return x;
 }
 
-// 把树的前 use 次合并当作"切法"，收集每个簇的成员与紧致度。
-// cut / cut_n_clusters / cut_min_size 都归约到这一步。
+// Treat the first `use` merges of the tree as the cut and collect every cluster's members
+// and cohesion. cut / cut_n_clusters / cut_min_size all reduce to this step.
 Cut partition_after(std::size_t use) const {
 	const std::size_t n = n_objects;
 	if (use > merges.size())
@@ -969,8 +1021,9 @@ Cut partition_after(std::size_t use) const {
 	for (std::size_t i = 0; i < total; i++)
 		uf_parent[i] = i;
 
-	//除了并起两个子节点，还必须把"这次合并产生的新节点"（id = n+i）也指到同一个集合里 ——
-	//否则后面某次合并拿 n+i 当子节点时它会被当成独立元素。
+	//Besides joining the two children, the node produced by this merge (id = n+i) must also
+	//point into the same set - otherwise a later merge using n+i as a child would treat it
+	//as a separate element.
 	for (std::size_t i = 0; i < use; i++) {
 		std::size_t a = uf_find(uf_parent, merges[i].left), b = uf_find(uf_parent, merges[i].right);
 		if (a != b)
@@ -978,7 +1031,8 @@ Cut partition_after(std::size_t use) const {
 		uf_parent[n + i] = uf_find(uf_parent, merges[i].left);
 	}
 
-	//每个簇的紧致度 = 该簇在前缀里最后一次合并写下的 cohesion（后写覆盖先写）
+	//A cluster's cohesion is the one written by the last merge of that cluster in the prefix
+	//(later writes overwrite earlier ones)
 	std::vector<double> root_cohesion(total, 0.0);
 	for (std::size_t i = 0; i < use; i++)
 		root_cohesion[uf_find(uf_parent, merges[i].left)] = merges[i].cohesion;
@@ -998,8 +1052,8 @@ Cut partition_after(std::size_t use) const {
 	return res;
 }
 
-// 切在相似度 min_similarity 处：相似度沿合并序列单调不增（三种链接都可归约），
-// 所以"切"就是取 similarity >= min_similarity 的那段前缀。
+// Cut at similarity min_similarity: similarity is non-increasing along the merge sequence,
+// so cutting is taking the prefix with similarity >= min_similarity.
 Cut cut(double min_similarity) const {
 	std::size_t k = 0;
 	while (k < merges.size() && merges[k].similarity >= min_similarity)
@@ -1007,22 +1061,23 @@ Cut cut(double min_similarity) const {
 	return partition_after(k);
 }
 
-// 正好 k 个簇：等价于取树的前 n-k 次合并。树是用 --floor 截断的话，
-// 可能凑不出 k 个簇 —— 那就给树能给出的最细切法。
+// Exactly k clusters: equivalent to taking the first n-k merges. If the tree was truncated
+// with --floor it may not reach k clusters, in which case the finest cut the tree supports
+// is returned.
 Cut cut_n_clusters(std::size_t k) const {
 	const std::size_t n = n_objects;
 	if (k >= n)
-		return partition_after(0);              // 比对象还多，就是全部分散
+		return partition_after(0);              // more than the object count: everything separate
 	if (k < 1)
-		k = 1;                                  // 0 个簇没有意义，按 1 处理
+		k = 1;                                  // 0 clusters is meaningless; treat it as 1
 	return partition_after(n - k);
 }
 
-// 合并到"没有小于 min_size 的簇"为止（取满足该条件的**最浅**切法）。
-// min_size <= 1 恒真，于是不合并 —— 全是单元素簇。
-// 注意：这一条**不是**"丢掉小簇"，而是"继续合并直到没有小簇"；如果还有
-// 互不相连的分量（相似度 0 的孤点），它们永远不会被并进来，这时返回树能给出的
-// 最细切法。
+// Merge until no cluster is smaller than min_size (the **shallowest** cut satisfying that).
+// min_size <= 1 always holds, so nothing merges and every cluster is a singleton.
+// Note this is **not** "discard small clusters" but "keep merging until there are none";
+// if disconnected components remain (isolated points at similarity 0) they never join in,
+// and then the finest cut the tree supports is returned.
 Cut cut_min_size(std::size_t min_size) const {
 	if (min_size <= 1)
 		return partition_after(0);
@@ -1035,10 +1090,11 @@ Cut cut_min_size(std::size_t min_size) const {
 		sz[i] = 1;
 	}
 	for (std::size_t i = n; i < total; i++)
-		parent[i] = i;                          // 合并出来的节点只是别名，自己不算元素（sz=0）
+		parent[i] = i;                          // merged nodes are aliases and count no elements of their own (sz=0)
 
-	// small = 还有多少个簇小于 min_size。合并只会让簇变大，所以这个量单调不增，
-	// 于是"第一个全都不小于 min_size 的位置"就是答案，不需要每次重扫所有簇。
+	// small = how many clusters are still below min_size. Merging only ever grows clusters,
+	// so this quantity is non-increasing and "the first position where none is below
+	// min_size" is the answer - no need to rescan all clusters each time.
 	std::size_t small = n;
 	std::size_t use = merges.size();
 	for (std::size_t i = 0; i < merges.size(); i++) {
@@ -1051,7 +1107,7 @@ Cut cut_min_size(std::size_t min_size) const {
 			sz[a] += sz[b];
 			if (sz[a] < min_size) small++;
 		}
-		parent[n + i] = a;                      // 新节点指向合并后的簇
+		parent[n + i] = a;                      // the new node points at the merged cluster
 		if (0 == small) {
 			use = i + 1;
 			break;
@@ -1074,9 +1130,10 @@ void reset() {
 } // namespace detail
 
 // ===========================================================================
-// 公开 API：全部是薄封装，一个虚函数都没有 —— 分派只发生在这些入口上，
-// 内层循环（merge_grp / get_max / 堆操作）完全在 linkage 已知的同一个函数里，
-// 所以运行时选链接方式不会在热路径上留下分支。
+// Public API: all thin wrappers, with no virtual function anywhere. Dispatch happens only
+// at these entry points, while the inner loops (merge_grp / get_max / heap operations)
+// stay inside one function where the linkage is known, so choosing the linkage at run time
+// leaves no branch in the hot path.
 // ===========================================================================
 
 HAC::HAC(Linkage mtd) : impl_(new detail::HACImpl(mtd)) {}

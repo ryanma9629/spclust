@@ -1,28 +1,28 @@
 #!/usr/bin/env python3
 """
-spclust 差分测试。
+spclust differential test.
 
-思路：spclust.cpp 是一个手写 malloc/free + 四向指针 + 十字链表的实现，
-这类代码最容易在边界上出错，而它的正确性无法靠读代码确认。
+The core is hand-written malloc/free with four-way pointers and a cross-linked list,
+which is exactly the kind of code that breaks at the edges, and whose correctness
 
-所以这里做三方交叉验证：
+cannot be established by reading it. So this does a three-way cross-check:
 
-  1. oracle(brute) —— 完全按定义、每步从原始稠密矩阵重算。最可信，但 O(n^4)。
-  2. oracle(fast)  —— 用恒等式增量维护聚合量。先要求 brute/fast 一致，
-                      一致后才有资格去测大数据。
-  3. spclust       —— 被测对象。
+  1. oracle(brute) - by definition, recomputed from the dense matrix at every step. Most trustworthy, O(n^4).
+  2. oracle(fast)  - incremental aggregates via the identity. brute/fast must agree first,
+                     and only then is it trusted on large inputs.
+  3. spclust       - the subject under test.
 
-三者独立实现。spclust 与 oracle 的逐次合并（成员集合 + 相似度）必须一致，
-除了两种可解释的合法分歧：
-  * 并列最大（合并顺序不确定）
-  * 相似度被截断成整数后产生并列
+All three are independent implementations. spclust and the oracle must agree merge by merge
+(member sets plus similarity), except for two explicable, legitimate divergences:
+  * a tie for the maximum (the merge order is unspecified)
+  * a tie created by truncating similarities to integers
 
-已知/已确认的分歧放在 tests/known_divergences.txt 里，需要写明理由。
+Known, accepted divergences live in tests/known_divergences.txt and must state a reason.
 
-另有一重回归护栏：若 spclust 退回用 unsigned short 存相似度（每步截断、误差会累积），
-差分测试会把偏差归类为 TRUNC 并**判定失败** —— 那个 bug 已修复，不该回来。
+There is also a regression guard: if spclust ever went back to storing similarities as unsigned
+short (truncating every step, with accumulating error) the deviation is classified TRUNC and
 
-用法：
+fails - that bug is fixed and must not come back.
     make test
     python3 tests/run_tests.py --bin-prefix ./spclust-linkage- --min-sim 50
     python3 tests/run_tests.py --only average --verbose
@@ -45,10 +45,10 @@ import oracle  # noqa: E402
 LINKAGE_BY_MTD = {0: "average", 1: "max", 2: "min"}
 MTD_BY_LINKAGE = {v: k for k, v in LINKAGE_BY_MTD.items()}
 
-# 超过这个规模就不跑 O(n^4) 的 brute oracle 了
+# Above this size the O(n^4) brute oracle is not run
 BRUTE_MAX_N = 24
 
-# 随机用例：(对象数, 边密度, 种子)
+# Random cases: (objects, edge density, seed)
 RANDOM_CONFIGS = [
     (10, 0.30, 1), (10, 0.30, 2), (10, 0.30, 3),
     (18, 0.45, 1), (18, 0.45, 2), (18, 0.45, 3),
@@ -59,10 +59,10 @@ RANDOM_CONFIGS = [
 
 OUTCOME_ORDER = ("PASS", "WARN", "KNOWN", "TRUNC", "DRIFT", "XPASS", "FAIL", "ORACLE")
 
-# 相对/绝对容差：oracle 用精确分数，spclust 用 double，链接值是浮点累加出来的。
-# 1e-9 足够宽到容忍舍入误差，又远小于任何真实偏差
-#（1 个单位在 ~100 的量级上就是 1e-2）。
-#多阈值切树检查用的阈值（覆盖整数与小数）
+# Relative/absolute tolerance: the oracle uses exact fractions, spclust uses double, and
+# linkage values accumulate in floating point. 1e-9 absorbs rounding while being far
+# smaller than any real deviation (1 unit at magnitude ~100 is 1e-2).
+#Thresholds for the multi-threshold cut check (integers and fractions)
 CUT_LEVELS = (1, 10, 25, 50, 66.6, 75, 85, 90, 95, 99)
 
 REL_TOL = 1e-9
@@ -74,20 +74,20 @@ def obj_names(member_ids, order):
 
 
 def gen_random_case(rng, n, density, tag):
-    """生成一个随机稀疏图用例。相似度取不重复的值，尽量避开并列。"""
+    """Build one random sparse case. Similarities are distinct, to avoid ties as far as possible."""
     pairs = [(i, j) for i in range(n) for j in range(i + 1, n) if rng.random() < density]
     if not pairs:
         return None
     k = len(pairs)
     if k <= 299:
-        # 从 0 开始取：让 sim=0 的边（="隐式零" 路径）也有机会被随机用例覆盖。
-        # 这个区间的改动是有理由的 —— tests/cases/22_zero_row_max.csv 那个 UAF 就是
-        # 老的 1..299 区间永远生成不出来的配置
+        # Starting at 0 lets edges with sim=0 (the "implicit zero" path) be covered by
+        # random cases too. The range matters: the use-after-free in
+        # tests/cases/22_zero_row_max.csv could never be generated from the old 1..299 range
         vals = rng.sample(range(0, 300), k)
     else:
         vals = rng.sample(range(1, 65535), k)
     lines = [
-        f"# 随机用例 n={n} density={density} tag={tag}（相似度互不相同）",
+        f"# random case n={n} density={density} tag={tag} (all similarities distinct)",
     ]
     lines += [f"r{i:02d},r{j:02d},{v}" for (i, j), v in zip(pairs, vals)]
     return "\n".join(lines) + "\n"
@@ -104,7 +104,7 @@ def load_known_divergences():
             continue
         parts = line.split(None, 2)
         if len(parts) < 3:
-            raise SystemExit(f"known_divergences.txt 格式错误（应为 '用例 linkage 理由'）: {raw!r}")
+            raise SystemExit(f"known_divergences.txt is malformed (expected 'case linkage reason'): {raw!r}")
         known[(parts[0], parts[1])] = parts[2]
     return known
 
@@ -128,27 +128,27 @@ def collect_cases(args):
 
 def run_spclust(bin_path, case_path, cut, linkage=None):
     proc = subprocess.run(
-        # --floor 0：算完整树，这样能与 oracle 的完整树逐次比对（比只比阈值以上更强）。
-        # --cut：本次要验证的切树位置。
-        # --matrix：走公开的 linkage 矩阵接口拿逐次合并（不再解析 DEBUG 日志）
-        # --linkage：链接方式现在是运行时的，所以一个二进制就能覆盖三种（以前要编三个）
+        # --floor 0: compute the full tree so it can be compared merge by merge with the
+        # oracle's full tree (stronger than comparing only above the threshold).
+        # --cut: the cut position being verified.
+        # --matrix: take the merges from the public linkage-matrix interface (no DEBUG-log parsing).
         [str(bin_path), str(case_path), "--floor", "0", "--cut", str(cut), "--matrix"]
         + ([] if linkage is None else ["--linkage", str(linkage)]),
         cwd=str(REPO), capture_output=True, text=True,
     )
     if proc.returncode != 0:
-        raise RuntimeError(f"spclust 退出码 {proc.returncode}:\n{proc.stderr}")
+        raise RuntimeError(f"spclust exited with {proc.returncode}:\n{proc.stderr}")
     return proc.stdout
 
 
 def values_equal(oracle_val, spclust_val):
-    """oracle 是精确分数，spclust 是 double —— 按相对误差比较。"""
+    """The oracle uses exact fractions, spclust uses double - compare by relative error."""
     a, b = float(oracle_val), float(spclust_val)
     return abs(a - b) <= ABS_TOL + REL_TOL * max(abs(a), abs(b))
 
 
 def merge_multiset(res):
-    """把合并序列看成“合并了哪些集合对”的多重集（忽略顺序）。"""
+    """View the merge sequence as a multiset of merged set pairs (order ignored)."""
     out = []
     for (A, B), _v in res["merges"]:
         a, b = tuple(sorted(A)), tuple(sorted(B))
@@ -157,25 +157,25 @@ def merge_multiset(res):
 
 
 def trunc_explains(o, o_trunc, got, o_trunc_cut):
-    """spclust 与精确定义的偏差是否完全由 unsigned short 截断解释。
+    """Whether spclust's deviation from the exact definition is fully explained by unsigned-short
 
-    包含两件事：
-      a) 逐次值被截断（每步少最多 1，且会累积）
-      b) 截断可能把两个不同的值（如 262.5 和 262.0）压成同一个值，产生并列，
-         而并列的打破顺序是实现细节
+    truncation. Two effects are involved:
+      a) each value is truncated (losing up to 1 per step, accumulating)
+      b) truncation can collapse two distinct values (262.5 and 262.0) into one, creating a tie
+         whose resolution is an implementation detail
 
-    因此要求：
-      1) 在第一次“截断造成并列”之前，截断镜像与 spclust 逐次完全一致（集合 + 值）
-      2) 两边执行的合并（作为多重集）相同
-      3) 最终分组相同
+    So it requires:
+      1) up to the first truncation-induced tie, the truncated mirror matches spclust exactly
+      2) both sides performed the same merges as a multiset
+      3) the final partitions agree
     """
     ts = o["trunc_steps"]
     om_list, gm_list = o_trunc["merges"], got["merges"]
     if ts:
-        # 只要求“第一次截断造成并列”之前完全一致，之后允许并列导致的顺序不同
+        # Only exact agreement up to the first truncation-induced tie is required; after that,
         limit = min(min(ts), len(om_list), len(gm_list))
     else:
-        # 没有截断并列，那就得全程一致
+        # a different order from that tie is allowed. With no such tie, all steps must agree.
         if len(om_list) != len(gm_list):
             return False
         limit = len(om_list)
@@ -188,15 +188,15 @@ def trunc_explains(o, o_trunc, got, o_trunc_cut):
 
 
 def compare(o, got, order, o_cut):
-    """返回 (outcome, detail)。
+    """Return (outcome, detail).
 
-    o 是 oracle 的**完整合并树**（min_sim=0）。
-    o_cut 是把 o 在本次阈值处切开得到的分区；spclust 打印的分区也切在同一阈值，
-    所以两者应当一致。合并序列本身则做完整比对 —— 比只比"阈值以上那段"更强。
+    o is the oracle's **full merge tree** (min_sim=0).
+    o_cut is o cut at the current threshold; spclust prints its partition at the same threshold,
+    so the two must agree. The merge sequences themselves are compared in full - stronger
     """
     om, gm = o["merges"], got["merges"]
 
-    # 找第一次分歧
+    # Find the first divergence
     k = None
     for i in range(min(len(om), len(gm))):
         if om[i][0] != gm[i][0]:
@@ -208,9 +208,9 @@ def compare(o, got, order, o_cut):
     if k is None:
         drift = [i for i in range(len(om)) if not values_equal(om[i][1], gm[i][1])]
         if o_cut != got["partition"]:
-            return "FAIL", "merge 全一致但在该阈值处切开的分组不同"
+            return "FAIL", "all merges agree but the partitions at this threshold differ"
         if drift:
-            return "DRIFT", f"{len(drift)} 步相似度不一致，第 {drift[0]} 步: " \
+            return "DRIFT", f"{len(drift)} steps differ in similarity, first at step {drift[0]}: " \
                            f"oracle={float(om[drift[0]][1]):.6f} spclust={float(gm[drift[0]][1]):.6f}"
         return "PASS", ""
 
@@ -221,49 +221,49 @@ def compare(o, got, order, o_cut):
     if k < len(om) and k < len(gm):
         A, B = om[k][0]
         C, D = gm[k][0]
-        detail.append(f"第 {k} 步: oracle 合并 {obj_names(A, order)}|{obj_names(B, order)}"
+        detail.append(f"step {k}: oracle merged {obj_names(A, order)}|{obj_names(B, order)}"
                       f"(sim={float(om[k][1]):.6f}) "
                       f"vs spclust {obj_names(C, order)}|{obj_names(D, order)}(sim={float(gm[k][1]):.6f})")
     else:
-        detail.append(f"第 {k} 步起停止位置不同: oracle 共 {len(om)} 次合并，spclust {len(gm)} 次")
-    detail.append("oracle 分组=" + str(sorted(sorted(obj_names(g, order)) for g in o_cut)))
-    detail.append("spclust 分组=" + str(sorted(sorted(obj_names(g, order)) for g in got["partition"])))
+        detail.append(f"stop position differs from step {k}: oracle {len(om)} merges, spclust {len(gm)}")
+    detail.append("oracle partition=" + str(sorted(sorted(obj_names(g, order)) for g in o_cut)))
+    detail.append("spclust partition=" + str(sorted(sorted(obj_names(g, order)) for g in got["partition"])))
     if ties:
-        detail.append(f"并列/截断发生在第 {ties} 步")
+        detail.append(f"tie/truncation at step {ties}")
 
     return ("WARN" if tie_explains else "FAIL"), "; ".join(detail)
 
 
 def main(argv=None):
-    ap = argparse.ArgumentParser(description="spclust 差分测试")
+    ap = argparse.ArgumentParser(description="spclust differential test")
     ap.add_argument("--bin", default="./spclust",
-                    help="被测二进制，默认 ./spclust（链接方式用 --linkage 运行时选）")
+                    help="binary under test, default ./spclust (pick the linkage with --linkage)")
     ap.add_argument("--min-sim", type=int, default=50,
-                    help="必须与二进制编译时的 MIN_SIM_CLUST 一致")
+                    help="must match the MIN_SIM_CLUST the binary was compiled with")
     ap.add_argument("--only", choices=sorted(LINKAGE_BY_MTD.values()),
-                    help="只测某一种 linkage")
-    ap.add_argument("--case", help="只跑文件名包含该子串的用例")
-    ap.add_argument("--quick", action="store_true", help="跳过大规模用例")
-    ap.add_argument("--no-random", action="store_true", help="只跑 tests/cases 下的手写用例")
+                    help="test only one linkage")
+    ap.add_argument("--case", help="only run cases whose filename contains this substring")
+    ap.add_argument("--quick", action="store_true", help="skip the large cases")
+    ap.add_argument("--no-random", action="store_true", help="only run the hand-written cases in tests/cases")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args(argv)
 
     linkages = [args.only] if args.only else sorted(LINKAGE_BY_MTD.values())
 
-    # 检查二进制
+    # Check the binary
     binp = REPO / args.bin
     if not binp.exists():
-        raise SystemExit(f"找不到 {binp}，先跑 `make`（或直接用 `make test`）")
+        raise SystemExit(f"cannot find {binp}; run `make` first (or just use `make test`)")
 
     known = load_known_divergences()
     cases = collect_cases(args)
     if args.case:
         cases = [c for c in cases if args.case in c[0]]
     if not cases:
-        raise SystemExit("没有匹配的用例")
+        raise SystemExit("no matching cases")
 
     print("=" * 78)
-    print(f"spclust 差分测试   用例 {len(cases)} 个   linkage {linkages}   min_sim={args.min_sim}")
+    print(f"spclust differential test   {len(cases)} cases   linkage {linkages}   min_sim={args.min_sim}")
     print("=" * 78)
 
     counts = {lk: {} for lk in linkages}
@@ -282,13 +282,13 @@ def main(argv=None):
         for w in warnings:
             notes.append(f"{name}: {w}")
         if len(order) < 2:
-            notes.append(f"{name}: 对象少于 2 个，跳过")
+            notes.append(f"{name}: fewer than 2 objects, skipped")
             continue
 
         for lk in linkages:
-            # oracle 自检 1：小规模时同时跑 brute（每步按定义重算）和 fast（增量维护），
-            # 两者必须逐次一致，否则是测试工具自身的问题，而不是 spclust 的问题。
-            # 这里算的是**完整树**（min_sim=0），所以比对的是整棵树，比只比阈值以上那段更强。
+            # Oracle self-check 1: on small inputs run both brute (recompute by definition each
+            # step) and fast (incremental). They must agree, otherwise the harness itself is at
+            # fault rather than spclust. The **full tree** (min_sim=0) is compared.
             use_brute = len(order) <= BRUTE_MAX_N
             mode = "brute" if use_brute else "fast"
             o = oracle.hac(order, edges, lk, 0, mode)
@@ -297,21 +297,21 @@ def main(argv=None):
             if use_brute:
                 o_fast = oracle.hac(order, edges, lk, 0, "fast")
                 if o["merges"] != o_fast["merges"] or o["partition"] != o_fast["partition"]:
-                    outcome, detail = "ORACLE", "brute 与 fast 两个 oracle 实现不一致"
+                    outcome, detail = "ORACLE", "the brute and fast oracle implementations disagree"
                 else:
                     selfcheck += 1
 
-            # oracle 自检 2：切树的单调性。
-            # "把完整树切在 X 处" 必须等于 "直接用 X 当停止条件跑一遍" ——
-            # 这依赖相似度沿合并序列单调不增（三种链接都是可归约的）。不成立就说明
-            # 切树语义有问题，而 spclust 的 --cut 正是这么切的。
+            # Oracle self-check 2: monotonicity of cutting.
+            # "cut the full tree at X" must equal "run with X as the stopping condition" -
+            # which relies on similarity being non-increasing along the merge sequence (all three
+            # linkages are reducible). If it failed, the cut semantics would be broken - and
             o_stop = oracle.hac(order, edges, lk, args.min_sim, mode)
             if o_stop["partition"] != o_cut:
-                outcome, detail = "ORACLE", "切树与提前停止得到的分组不一致（单调性不成立？）"
+                outcome, detail = "ORACLE", "cutting and early stopping gave different partitions (monotonicity?)"
             else:
                 selfcheck += 1
 
-            # “截断镜像”：验证 spclust 与精确定义的偏差是否完全来自 unsigned short 截断
+            # Truncated mirror: check whether spclust's deviation from the exact definition
             o_trunc = oracle.hac(order, edges, lk, 0, "trunc")
             o_trunc_cut = oracle.cut(o_trunc, args.min_sim)
 
@@ -322,26 +322,26 @@ def main(argv=None):
 
                 if outcome != "PASS" and o_trunc["merges"] != o["merges"] \
                         and trunc_explains(o, o_trunc, got, o_trunc_cut):
-                    # 偏差能由“每步截断成整数”解释 —— 即旧的 unsigned short 问题回来了
+                    # The deviation is explained by integer truncation at each step, i.e. the old
                     outcome = "TRUNC"
-                    detail = "【回归】偏差可由 unsigned short 整数截断解释；" \
-                             "spclust 的相似度应当是 double: " + detail
+                    detail = "[REGRESSION] the deviation is explained by unsigned-short truncation; " \
+                             "similarities should be double: " + detail
                 elif (name, lk) in known and outcome in ("FAIL", "DRIFT", "WARN"):
-                    detail = f"[已知] {known[(name, lk)]} -- {detail}"
+                    detail = f"[known] {known[(name, lk)]} -- {detail}"
                     outcome = "KNOWN"
                 elif (name, lk) in known and outcome == "PASS":
                     outcome = "XPASS"
-                    detail = f"[已知分歧已消失] {known[(name, lk)]}"
+                    detail = f"[known divergence is gone] {known[(name, lk)]}"
 
-                # 多阈值切树一致性：既然两边都拿到了**完整树**，就可以在若干阈值处
-                # 各自切一刀再比 —— 这直接验证 --cut 这个功能。
-                # 只在合并序列完全一致（PASS）时做：有并列最大值的用例合并顺序本就可能不同，
-                # 切出来的分组自然也可能不同。
+                # Multi-threshold cut consistency: since both sides have the **full tree**,
+                # cut at several thresholds and compare - a direct test of --cut.
+                # Only when the merge sequences agree exactly (PASS): with a tied maximum the order
+                # may legitimately differ, and so may the resulting partitions.
                 if outcome == "PASS":
                     got_tree = {"objects": o["objects"], "merges": got["merges"]}
                     for t in CUT_LEVELS:
                         if oracle.cut(got_tree, t) != oracle.cut(o, t):
-                            outcome, detail = "FAIL", f"在 cut={t} 处切开的分组不一致"
+                            outcome, detail = "FAIL", f"partitions differ at cut={t}"
                             break
                     else:
                         cut_checks += len(CUT_LEVELS)
@@ -356,7 +356,7 @@ def main(argv=None):
                   f"groups={len(o['groups'])}"
                   + (f"  {detail}" if args.verbose or outcome in ("FAIL", "ORACLE", "DRIFT", "TRUNC") else ""))
             if o["duplicate_pairs"] and outcome in ("PASS", "TRUNC"):
-                notes.append(f"{name}/{lk}: 输入含 {o['duplicate_pairs']} 条重复 pair")
+                notes.append(f"{name}/{lk}: input has {o['duplicate_pairs']} duplicate pairs")
 
     tmpdir.cleanup()
 
@@ -370,29 +370,29 @@ def main(argv=None):
         for k, v in counts[lk].items():
             total[k] += v
     print("-" * 78)
-    print(f"oracle 自检（brute/fast 一致 + 切树=提前停止）: {selfcheck} 次")
-    print(f"多阈值切树一致性检查: {cut_checks} 次")
-    print(f"合计: PASS={total['PASS']} WARN={total['WARN']} KNOWN={total['KNOWN']} "
+    print(f"oracle self-checks (brute/fast agree + cut == early stop): {selfcheck}")
+    print(f"multi-threshold cut consistency checks: {cut_checks}")
+    print(f"total: PASS={total['PASS']} WARN={total['WARN']} KNOWN={total['KNOWN']} "
           f"TRUNC={total['TRUNC']} DRIFT={total['DRIFT']} XPASS={total['XPASS']} "
           f"FAIL={total['FAIL']} ORACLE={total['ORACLE']}")
 
     if notes:
         print()
-        print("备注:")
+        print("notes:")
         for n in notes:
             print(f"  - {n}")
 
     if failures:
         print()
-        print("失败详情:")
+        print("failure detail:")
         for lk, name, detail in failures:
             print(f"  [{lk}] {name}")
             for part in detail.split("; "):
                 print(f"      {part}")
 
-    # XPASS（已知分歧消失）不算失败：它依赖阈值 —— 例如某用例在某阈值下根本不合并，
-    # 重复 pair 之类的分歧就自然消失了。但它会被打印出来，便于清理过期的记录。
-    # TRUNC 则算失败：它意味着 unsigned short 截断那个 bug 又回来了。
+    # XPASS (a known divergence that disappeared) is not a failure: it depends on the
+    # threshold - e.g. a case that merges nothing at some threshold makes duplicate-pair
+    # divergences vanish. It is still printed so stale records get cleaned up. TRUNC does
     ok = not failures and total["DRIFT"] == 0
     print()
     print("RESULT:", "PASS" if ok else "FAIL")

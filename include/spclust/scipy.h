@@ -5,32 +5,43 @@
 #define SPCLUST_SCIPY_H
 
 // ===========================================================================
-// scipy 互操作：把本库的合并树导出成 scipy.cluster.hierarchy 的 linkage 矩阵。
+// scipy interop: export this library's merge tree as a
+// scipy.cluster.hierarchy linkage matrix.
 //
-// scipy 的矩阵每行是 [idx1, idx2, height, count]：
-//   * idx1/idx2 是这次合并的两个子节点，**升序**；
-//   * height 是**距离**（越小越先合并），而非相似度 —— 这正是两边最大的差别；
-//   * count 是合并后的样本数；
-//   * 节点编号约定与我们相同：0..n-1 是叶子，n+i 是第 i 次合并。
+// A scipy row is [idx1, idx2, height, count]:
+//   * idx1/idx2 are the two children merged, **ascending**;
+//   * height is a **distance** (smaller merges first), not a similarity - this is
+//     the main difference between the two conventions;
+//   * count is the number of samples in the merged cluster;
+//   * node numbering matches ours: 0..n-1 are the leaves, n+i is merge i.
 //
-// 相似度 -> 距离 的映射必须由调用方选（相似度不是距离，没有唯一正确映射）：
+// The similarity -> distance mapping has to be chosen by the caller (a similarity
+// is not a distance, and there is no single correct mapping):
 //
-//   Complement  dist = C - sim，C 默认取树里的最大相似度。
-//               这是**语义上最忠实**的一个：本库的"缺失边 = 相似度 0"正好对应
-//               "距离 = C"，于是 average 链接等价于 scipy 的 method='average'
-//               作用在同一个稠密距离矩阵上（已实测逐次一致，只差并列顺序）。
-//   Negate      dist = -sim。保序、无参，但距离为负。
-//   Reciprocal  dist = 1/sim（sim 为 0 时给 +inf）。只对"相似度像亲和度"的数据有意义。
+//   Complement  dist = C - sim, with C defaulting to the largest similarity in the
+//               tree. This is the **most faithful** one: this library's "a missing
+//               edge is similarity 0" corresponds exactly to "distance C", so
+//               Average linkage becomes scipy's method='average' applied to the
+//               same dense distance matrix (measured: identical merge for merge,
+//               differing only in tie order).
+//   Negate      dist = -sim. Order-preserving and parameter-free, but distances
+//               are negative.
+//   Reciprocal  dist = 1/sim (+inf when sim is 0). Only meaningful when
+//               similarities behave like affinities.
 //
-// **两条已知差异**（不是 bug，是语义不同）：
+// **Two known differences** (semantics, not bugs):
 //
-//   1. `Linkage::MinNonzero` 与 scipy 的 method='complete' 不同。scipy 的 complete
-//      在每个缺失对上取到最大距离（= 相似度 0），于是稀疏输入下几乎处处为 0；
-//      本库只对"两边都存在的边"取最小。**稠密输入下两者相同**（已实测）。
-//   2. 树可能是**森林**：`Linkage::MinNonzero` 下两簇之间根本没有边时，这个 pair
-//      连候选都不是，于是分量可能永远合不起来。scipy 的矩阵要求恰好 n-1 行
-//      （它总是把所有东西并成一棵树），所以这里可以显式要求补"桥接"行：
-//      把这些根按给定距离依次合并。默认不补，`n_components > 1` 时由调用方决定。
+//   1. `Linkage::MinNonzero` is not scipy's method='complete'. scipy reaches the
+//      maximum distance (= similarity 0) on every missing pair, which on sparse
+//      input makes almost everything look far apart; this library takes the
+//      minimum only over pairs where both sides have an edge. **On dense input
+//      the two agree** (measured).
+//   2. The tree may be a **forest**: under `Linkage::MinNonzero` a pair of
+//      clusters with no edge between them is not even a candidate, so components
+//      may never merge. A scipy matrix must have exactly n-1 rows (scipy always
+//      ends up with a single tree), so bridging rows can be requested explicitly:
+//      the roots are merged in turn at a given distance. Nothing is bridged by
+//      default; the caller decides based on `n_components`.
 // ===========================================================================
 
 #include <cstddef>
@@ -45,45 +56,49 @@ namespace spclust {
 enum class DistanceMap {
 	Complement,   // C - sim
 	Negate,       // -sim
-	Reciprocal,   // 1/sim（sim <= 0 时 +inf）
+	Reciprocal,   // 1/sim (+inf when sim <= 0)
 };
 
-// scipy linkage 矩阵的一行
+// One row of the scipy linkage matrix.
 struct ScipyRow {
-	std::uint32_t left;      // 较小的子节点
-	std::uint32_t right;     // 较大的子节点
+	std::uint32_t left;      // the smaller child
+	std::uint32_t right;     // the larger child
 	double distance;
 	std::uint32_t size;
 };
 
 struct ScipyOptions {
 	DistanceMap map = DistanceMap::Complement;
-	// Complement 用的 C。0 表示"自动取树里的最大相似度"。
+	// The C used by Complement. 0 means "take the largest similarity in the tree".
 	double reference = 0.0;
-	// 是否把森林补成一棵树（scipy 要求恰好 n-1 行）
+	// Whether to turn a forest into a single tree (scipy requires exactly n-1 rows)
 	bool bridge = false;
-	// 桥接用的距离。NaN = 自动，取当前映射下最忠实的值：
-	//   Complement -> reference（C）。因为"两边没有边"在所有 pair 上的距离都是 C，
-	//                 这也正是 scipy 自己对这两个分量算出来的值。
-	//   Negate / Reciprocal -> +inf（没有比这更远的说法了）。
+	// Distance used for the bridging rows. NaN means automatic, which picks the
+	// most faithful value for the mapping:
+	//   Complement -> reference (C). With no edges between two components every
+	//                 pair distance is C, which is exactly what scipy itself
+	//                 would compute for them.
+	//   Negate / Reciprocal -> +inf (nothing can be farther apart).
 	double bridge_distance = std::numeric_limits<double>::quiet_NaN();
 };
 
 struct ScipyExport {
 	std::vector<ScipyRow> rows;
 	std::size_t n_objects = 0;
-	std::size_t n_components = 0;   // 树里有几个根；>1 就是森林
-	bool bridged = false;           // 是否补过桥接行
-	// 距离是否沿合并序列非递减。scipy 的 dendrogram / fcluster 都假定这一点；
-	// 三种链接里 average 与 max 保证单调，MinNonzero 不保证。
+	std::size_t n_components = 0;   // number of roots in the tree; > 1 means a forest
+	bool bridged = false;           // whether bridging rows were appended
+	// Whether distances are non-decreasing along the merge sequence. scipy's
+	// dendrogram and fcluster both assume this; Average and MaxSimilarity
+	// guarantee it, MinNonzero does not.
 	bool monotonic = true;
 };
 
-// 纯函数：只读树，不改任何状态。
+// Pure function: reads the tree, changes no state.
 ScipyExport to_scipy(const std::vector<Merge>& tree, std::size_t n_objects,
 					 const ScipyOptions& options = ScipyOptions());
 
-// 该映射在给定参考值下的距离函数（导出时也可用于自己算阈值）
+// The distance function of a mapping under a given reference value (useful for
+// converting thresholds yourself).
 double map_distance(double similarity, DistanceMap map, double reference);
 
 } // namespace spclust
