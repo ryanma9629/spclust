@@ -2,6 +2,8 @@
 #include "readdb.h"
 #include <utility>
 
+using namespace std;
+
 //“左向量”，记录每个横向链的头、值最大节点
 vector<p_dim1> vec_dim1;
 //“顶向量”，记录每个纵向链的头
@@ -266,7 +268,9 @@ static void note_row_changed(size_t row) {
 //实测（800k 边 / 8 万对象的采样画像）字符串查找是初始化段的主要开销。
 typedef unordered_map<string, size_t> obj_id_map;
 obj_id_map map_obj_grp;
-extern vector<grp_s> grp;
+//聚类过程中的活组表。
+//以前它定义在 main.cpp、这里用 extern 串起来；现在收进本文件（main.cpp 已经不读它了）。
+static vector<grp_s> grp;
 
 //将一个(group1, group2, sim)的节点加入结构，每次加入所在链表的头位置
 uint32_t add_grp(size_t group1, size_t group2, double sim) {
@@ -455,7 +459,7 @@ void init_add_edge(string obj1, string obj2, double sim) {
 	if (o1.second) {
 		//映射为当前最大的组号+1（就是插入前的 size()），并让”分组向量“记录obj1自成的新组
 		grp.resize(map_obj_grp.size());
-		grp[map_obj_grp.size() - 1].sim = 0;
+		grp[map_obj_grp.size() - 1].sim = EMPTY_COHESION;
 		grp[map_obj_grp.size() - 1].n_members = 1;
 		object_names.push_back(o1.first->first);   // id -> 名字，供输出用
 	}
@@ -464,7 +468,7 @@ void init_add_edge(string obj1, string obj2, double sim) {
 		map_obj_grp.insert(pair<string, size_t>(std::move(obj2), map_obj_grp.size()));
 	if (o2.second) {
 		grp.resize(map_obj_grp.size());
-		grp[map_obj_grp.size() - 1].sim = 0;
+		grp[map_obj_grp.size() - 1].sim = EMPTY_COHESION;
 		grp[map_obj_grp.size() - 1].n_members = 1;
 		object_names.push_back(o2.first->first);
 	}

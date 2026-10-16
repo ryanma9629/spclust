@@ -2,8 +2,9 @@
 #include "spclust.h"
 #include "readdb.h"
 
-//聚类结果（spclust.cpp 以 extern 方式使用）
-vector<grp_s> grp;
+using namespace std;
+
+//注意：活组表 grp 现在是 spclust.cpp 内部的状态，这里不再有全局变量要串联。
 
 namespace {
 
@@ -17,6 +18,7 @@ double cut_sim = (double)MIN_SIM_CLUST;
 bool floor_given = false;
 double tree_floor = (double)MIN_SIM_CLUST;
 bool show_tree = false;
+int tree_depth = 6;          // --tree 的深度上限；0 表示不限
 bool show_matrix = false;
 
 //注意：这里用中性名字。原代码把 1 标为 complete、2 标为 single，
@@ -165,7 +167,7 @@ void print_subtree(size_t node, int depth, int max_depth) {
 	}
 	const merge_rec& r = merges[node - n];
 	cout << "+ merged at sim=" << r.sim << " (size=" << r.size << ")" << endl;
-	if (depth + 1 > max_depth) {
+	if (max_depth > 0 && depth + 1 > max_depth) {
 		for (int i = 0; i <= depth; i++)
 			cout << "  ";
 		cout << "... (" << r.size << " objects, 用 --matrix 取完整数据)" << endl;
@@ -185,7 +187,7 @@ void print_tree(void) {
 	}
 	cout << "Dendrogram (" << n << " objects, " << merges.size() << " merges; "
 		<< "阈值只是切树位置，树本身是完整的):" << endl;
-	const int max_depth = 6;
+	const int max_depth = tree_depth;
 	size_t roots = 0;
 	for (size_t node = 0; node < n + merges.size(); node++) {
 		if (!is_child[node]) {
@@ -220,6 +222,7 @@ void usage(const char* prog) {
 	     << "，即编译期 MIN_SIM_CLUST）" << endl
 	     << "  --floor <X>      树算到多低（默认 = cut；0 = 完整树，代价是慢 2~4 倍）" << endl
 	     << "  --tree           打印树状图" << endl
+	     << "  --tree-depth <N> 树状图的深度上限（默认 " << 6 << "，0 = 不限；隐含 --tree）" << endl
 	     << "  --matrix         打印 linkage 矩阵（left right height size）" << endl
 	     << "  -h, --help       显示这个" << endl;
 }
@@ -245,6 +248,14 @@ int main(int argc, char* argv[]) {
 			floor_given = true;
 		} else if ("--tree" == a) {
 			show_tree = true;
+		} else if ("--tree-depth" == a) {
+			if (++i >= argc) {
+				cerr << "--tree-depth 需要一个数值" << endl;
+				return 2;
+			}
+			tree_depth = atoi(argv[i]);
+			show_tree = true;        // 给了深度显然是想看树
+
 		} else if ("--matrix" == a) {
 			show_matrix = true;
 		} else if ("-h" == a || "--help" == a) {
@@ -268,7 +279,10 @@ int main(int argc, char* argv[]) {
 
 	//无参数或 "-" 都表示从标准输入读取。
 	//边一边读一边就进结构了（不缓存整个输入），所以 init 阶段并进了这里。
-	readdb(path, &init_add_edge);
+	//返回 0 表示失败（原因 readdb 已经写到 stderr）。以前是 readdb 内部直接 exit(1)，
+	//那样没法当库用；现在由这里给退出码。
+	if (0 == readdb(path, &init_add_edge))
+		return 1;
 
 	if (DEBUG >= 1)
 		cout << "Linkage=" << linkage_name() << ", cut=" << cut_sim << endl << endl;

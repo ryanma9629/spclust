@@ -15,6 +15,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <ctime>
@@ -22,6 +23,7 @@
 #include <algorithm>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <unordered_map>
 #include <string>
@@ -57,20 +59,24 @@
 #define DEBUG_FREQ_CLUST 100
 #endif
 
-#ifndef MIN_ACCT_NUM
-#define MIN_ACCT_NUM 2
-#endif
-
-#ifndef MIN_SIM_WG
-#define MIN_SIM_WG 50
-#endif
-
 //调试信息级别：0=静默 1=阶段与进度 2=每次合并的细节
 #ifndef DEBUG
 #define DEBUG 1
 #endif
 
-using namespace std;
+//这里**不放** `using namespace std;`：那会把整个 std 命名空间注入到所有包含本头文件的
+//翻译单元里。头文件里的类型一律写 std::，各 .cpp 自己决定要不要 using。
+
+//单元素组的"组内平均相似度"初值。
+//
+//average / max 的合并式里 0 是合适的初值；但 min 链接的合并式是 min(min(g1,g2), max_sim)，
+//0 是吸收元，会让紧致度报告恒为 0。单元素组本来就没有"组内边"，
+//它的初值应该是**空集的 +∞**，这样 min 才有意义。
+#if 2 == LINKAGE_MTD
+static const double EMPTY_COHESION = std::numeric_limits<double>::infinity();
+#else
+static const double EMPTY_COHESION = 0.0;
+#endif
 
 //聚类过程中保存相似性的节点。
 //
@@ -114,7 +120,7 @@ struct merge_rec {
 	uint32_t right;     // 右子节点
 	double sim;         // 合并时的相似度（该簇的"高度"，越大越先合并）
 	double cohesion;    // 合并后整个簇的组内平均相似度（沿用原来输出里 sim= 的含义）
-	size_t size;        // 合并后的簇大小
+	std::size_t size;   // 合并后的簇大小
 };
 
 //聚类过程中的活组：组内平均相似度 + 成员数。
@@ -125,6 +131,6 @@ struct merge_rec {
 //（n=200k 时约 10 MB）。
 struct grp_s {
 	double sim;
-	size_t n_members;
+	std::size_t n_members;
 };
 #endif

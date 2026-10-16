@@ -6,6 +6,8 @@
 #include <sstream>
 #include <utility>
 
+using namespace std;
+
 namespace {
 
 //去掉首尾空白（以及可有可无的成对双引号）
@@ -91,7 +93,7 @@ size_t readdb(const char* path, edge_handler on_edge) {
 		file.open(path);
 		if (!file.is_open()) {
 			cerr << "Cannot open input file: " << path << endl;
-			exit(1);
+			return 0;                 // 0 = 失败，见 readdb.h
 		}
 		in = &file;
 		source = path;
@@ -184,11 +186,11 @@ size_t readdb(const char* path, edge_handler on_edge) {
 
 	if (in->bad()) {
 		cerr << "I/O error while reading " << source << "." << endl;
-		exit(1);
+		return 0;
 	}
 	if (0 == n_read) {
 		cerr << "No records to read." << endl;
-		exit(1);
+		return 0;
 	}
 
 	clock_t e_time = clock();

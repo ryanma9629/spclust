@@ -62,17 +62,17 @@ run: $(BIN)
 	./$(BIN) $(DATA)
 
 # 差分测试：独立 oracle 与 spclust 逐次合并比对，覆盖三种 linkage
-test: linkages
+test: $(BIN) linkages
 	$(PYTHON) tests/run_tests.py --bin-prefix ./$(LBIN)- --min-sim $(MIN_SIM)
 	$(PYTHON) tests/test_cli.py --bin ./$(BIN)
 
 # 性能回归护栏：固定生成器的输入 + 交替重复取中位，与 tests/bench_baseline.txt 比。
 # 超出容差只警告，超过 3x 时间 / 2x 内存才失败（机器噪声大，硬判定会误报）。
-bench: linkages
+bench: $(BIN) linkages
 	$(PYTHON) tests/bench.py --bin ./$(BIN) --bin-linkage ./$(LBIN)-1 $(BENCH_ARGS)
 
 # 有意改变性能之后重新记录基线（换机器也要重记）
-bench-update: linkages
+bench-update: $(BIN) linkages
 	$(PYTHON) tests/bench.py --bin ./$(BIN) --bin-linkage ./$(LBIN)-1 --update
 
 # 三种 linkage 各跑一遍 sim.csv，用于肉眼对比
