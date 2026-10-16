@@ -38,6 +38,11 @@ import oracle                                                # noqa: E402
 
 CASES = sorted((HERE / "cases").glob("*.csv")) + [REPO / "sim.csv"]
 
+# The command-line binary to compare against. The Makefile build puts it next to the
+# sources, a CMake build puts it in the build directory, so the caller passes --cli
+# (the CMake test does) and this is only the default.
+CLI = REPO / "spclust"
+
 
 def load_module(lib):
     import spclust
@@ -68,7 +73,7 @@ def edges_of(case):
 
 
 def cli_matrix(case, linkage):
-    out = subprocess.run([str(REPO / "spclust"), str(case), "--floor", "0", "--matrix",
+    out = subprocess.run([str(CLI), str(case), "--floor", "0", "--matrix",
                           "--linkage", str(linkage)], capture_output=True, text=True).stdout
     rows = []
     for line in out.splitlines():
@@ -98,7 +103,7 @@ def same_tree(got, want):
 
 
 def cli_groups(case, cut, linkage):
-    out = subprocess.run([str(REPO / "spclust"), str(case), "--cut", str(cut),
+    out = subprocess.run([str(CLI), str(case), "--cut", str(cut),
                           "--linkage", str(linkage)], capture_output=True, text=True).stdout
     groups = []
     for line in out.splitlines():
@@ -110,10 +115,26 @@ def cli_groups(case, cut, linkage):
 
 
 def main():
+    global CLI
     ap = argparse.ArgumentParser(description="Python binding tests")
     ap.add_argument("--lib", default=None, help="shared library (default: auto-locate)")
+    ap.add_argument("--cli", default=str(CLI),
+                    help="spclust command-line binary to cross-check against")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
+
+    # Path("./spclust") normalizes to "spclust" (dropping the slash) and subprocess would
+    # then search PATH, so make it absolute before anything else - the same trap test_cli.py
+    # documents.
+    CLI = Path(args.cli)
+    if not CLI.is_absolute():
+        CLI = (Path.cwd() / CLI).resolve()
+    if not CLI.exists():
+        # Failing loudly matters here: it would otherwise look like a passing run that
+        # checked nothing, which is exactly how the CMake build's different binary
+        # location stayed hidden until CI.
+        print(f"cannot find the spclust CLI at {CLI}; pass --cli <path>")
+        return 1
 
     sp = load_module(args.lib)
     ok = 0
@@ -234,7 +255,7 @@ def main():
             h2.add_edges(r2, c2, s2)
             h2.build()
             got = h2.to_scipy(bridge=True)
-            cli = subprocess.run([str(REPO / "spclust"), str(case), "--scipy", "--scipy-bridge",
+            cli = subprocess.run([str(CLI), str(case), "--scipy", "--scipy-bridge",
                                   "--linkage", str(linkage)],
                                  capture_output=True, text=True).stdout
             want = []

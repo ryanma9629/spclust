@@ -103,8 +103,8 @@ test-scipy: $(BIN)
 
 # Python binding (ctypes over the C API). Needs numpy for the array path; the test skips
 # itself and returns 0 when numpy or the shared library is missing.
-test-py: $(SHARED_A)
-	PYTHONPATH=python $(PYTHON) tests/test_python.py
+test-py: $(BIN) $(SHARED_A)
+	PYTHONPATH=python $(PYTHON) tests/test_python.py --lib ./$(SHARED_A) --cli ./$(BIN)
 
 # C API: compile the test with a **C compiler** (proving the header is plain C), then call
 # it from Python via ctypes (dlopen, symbol names, struct layout, the exception boundary).

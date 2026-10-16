@@ -123,7 +123,8 @@ if(SPCLUST_BUILD_TESTS)
     add_test(NAME python_binding
              COMMAND ${CMAKE_COMMAND} -E env PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python
                      ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_python.py
-                     --lib $<TARGET_FILE:spclust_shared>)
+                     --lib $<TARGET_FILE:spclust_shared>
+                     --cli $<TARGET_FILE:spclust_cli>)
     set_tests_properties(python_binding PROPERTIES
                          WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 

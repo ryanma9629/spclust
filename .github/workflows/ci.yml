@@ -51,8 +51,10 @@ jobs:
 
       - name: Python binding against the shared library, outside CMake
         run: |
+          make                      # the CLI binary the comparison cross-checks against
           make lib-shared
-          PYTHONPATH=python .venv/bin/python tests/test_python.py --lib ./libspclust.so
+          PYTHONPATH=python .venv/bin/python tests/test_python.py \
+            --lib ./libspclust.so --cli ./spclust
 
       - name: Library-only build (proves no dependency on tools/ and that the options work)
         run: |
