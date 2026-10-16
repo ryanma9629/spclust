@@ -58,6 +58,20 @@
 单链接 **300x**。主要来源：去掉每次合并的 4 趟 O(n) 全量扫描、`get_max` 改最大堆、
 `init` 改哈希表、去掉 `get_unit` 的线性查找、流式读入、32 字节节点、单链接走 Kruskal。
 
+## [0.3.2] - 2026-10
+
+### Added
+
+- **C 接口**（`include/spclust/spclust_c.h`）：纯 C 头文件，给 FFI 用
+  （Rust / Go / Python ctypes / C 项目）。不透明句柄、两段式输出
+  （先问长度再填缓冲）、`spclust_status` 错误码、线程局部的 `spclust_last_error()`。
+  覆盖链接方式、三种切法、scipy 导出。
+  **C++ 异常绝不穿过 C 边界**：每个入口 try/catch 转成错误码，所以从别的语言传非法输入
+  只会拿到错误码，不会把宿主进程 abort 掉。
+- `tests/test_c_api.c`（用**C 编译器**编，顺带证明头文件是纯 C）+ `tests/test_c_api.py`
+  （ctypes 调共享库，验证 dlopen / 符号名 / 结构体布局 / 异常边界）。
+- `make test-c`、`make lib-shared`（`libspclust.so`）。
+
 ## [0.3.1] - 2026-10
 
 ### Added

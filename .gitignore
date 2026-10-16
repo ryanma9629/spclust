@@ -8,6 +8,8 @@
 /spclust-linkage-*
 /libspclust.a
 /cut_property
+/c_api_test
+/libspclust.so
 /hac.o
 /build/
 /build-*/

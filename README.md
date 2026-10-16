@@ -119,6 +119,46 @@ spclust_cli data.csv --floor 0        # 把树算到最底部（完整树；默�
 **注意 `height` 是相似度（越大越先合并），scipy 用的是距离。**
 `--cut` / `--floor` 的语义与成本见 [docs/design.md](docs/design.md)。
 
+## C 接口（给 FFI 用）
+
+`include/spclust/spclust_c.h` 是**纯 C**头文件（只用 `<stddef.h>` / `<stdint.h>`），
+能被 C / Rust / Go / Python ctypes 直接 include 或绑定：
+
+```c
+#include "spclust/spclust_c.h"
+
+spclust_hac* h = spclust_hac_new(SPCLUST_LINKAGE_AVERAGE);
+spclust_hac_add_edge(h, 0, 1, 90.0);
+spclust_hac_build(h, 0.0);
+
+size_t n = spclust_hac_tree_size(h);
+spclust_merge* rows = malloc(n * sizeof *rows);
+spclust_hac_tree(h, rows, n, &n);          /* 两段式：先问长度，再填缓冲 */
+
+spclust_cut* c = spclust_hac_cut(h, 50.0);
+for (size_t g = 0; g < spclust_cut_n_groups(c); g++) { ... }
+spclust_cut_free(c);
+spclust_hac_free(h);
+```
+
+设计要点：
+
+- **C++ 异常绝不穿过 C 边界**。每个入口都 `try/catch`，转成 `spclust_status`
+  （`SPCLUST_ERR_INVALID_ARGUMENT` / `OUT_OF_MEMORY` / `BUFFER_TOO_SMALL` / ...）。
+  细节用 `spclust_last_error()` 取，它是**线程局部**的。
+  （`tests/test_c_api.py` 专门测这条：从 Python 传自环，必须拿到错误码，而不是把进程 abort 掉。）
+- **不透明句柄**（`spclust_hac*` / `spclust_cut*`），一个句柄一份状态，多个句柄互不影响。
+- **缓存的归属清楚**：`spclust_hac_tree` 写调用方给的缓冲；`spclust_cut` 的一堆扁平视图
+  （`members` / `offsets` / `cohesion`）归库所有，用 `spclust_cut_free` 一次释放。
+- 链接方式、三种切法、scipy 导出都有对应入口；`spclust_linkage_from_name` 认
+  `average` / `max-similarity` / `min-nonzero`（以及 `max`/`single`/`min` 别名）。
+
+```bash
+make lib        # libspclust.a
+make lib-shared # libspclust.so（FFI 用；macOS 上 -shared 出来的也是 Mach-O，ctypes 能直接 dlopen）
+make test-c     # 用 C 编译器编测试 + 从 Python 用 ctypes 调一遍
+```
+
 ## 与 scipy 互操作
 
 ```bash
@@ -160,7 +200,7 @@ fcluster(Z, 3, criterion='maxclust')
 | [docs/design.md](docs/design.md) | 数据结构、算法流程、可调参数 |
 | [docs/known-issues.md](docs/known-issues.md) | 修过的 bug（含发现过程）+ 仍存在的问题 |
 | [docs/performance.md](docs/performance.md) | 性能实测、被实测否掉的优化、方法学教训 |
-| [docs/testing.md](docs/testing.md) | 切树属性测试 / 差分测试 / CLI 测试 / scipy 互操作 / 性能护栏 |
+| [docs/testing.md](docs/testing.md) | 切树属性 / 差分 / CLI / scipy 互操作 / C API（含 FFI）/ 性能护栏 |
 | [CHANGELOG.md](CHANGELOG.md) | 对使用者有意义的变化 |
 
 ## 测试与性能的量级

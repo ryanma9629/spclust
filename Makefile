@@ -2,7 +2,8 @@
 #
 #   make            构建 ./spclust
 #   make run        构建并跑 sim.csv
-#   make test       差分测试 + 切树属性测试 + CLI 测试 + scipy 互操作
+#   make test       差分测试 + 切树属性 + CLI + scipy 互操作 + C API
+#   make lib-shared 编出 libspclust.so（给 FFI/ctypes 用）
 #   make check      用三种 linkage 各跑一遍 sim.csv 做对比
 #   make asan       AddressSanitizer + UBSan 构建并运行（强烈建议跑一次）
 #   make asan-cases 用 ASan/UBSan 跑一遍 tests/cases 下全部用例
@@ -23,6 +24,7 @@
 # 注：MIN_SIM_CLUST / DEBUG 是 CLI 自己的编译期默认值（tools/cli_config.h 里用 #ifndef
 #     包住），命令行 -D 优先；库本体没有任何编译期选项。
 
+CC       ?= cc
 CXX      = c++
 CXXFLAGS ?= -std=c++17 -O2 -Wall -Wextra
 LDFLAGS  ?=
@@ -38,7 +40,7 @@ DEFS = -DMIN_SIM_CLUST=$(MIN_SIM) -DDEBUG=$(DEBUG)
 
 # 目录结构：库（src/ + include/）与使用者（tools/）分开。
 # 构建系统见 CMakeLists.txt；这个 Makefile 是开发时的快捷方式。
-LIB_SRCS = src/hac.cpp src/scipy.cpp
+LIB_SRCS = src/hac.cpp src/scipy.cpp src/spclust_c.cpp
 CLI_SRCS = tools/spclust_cli.cpp tools/readdb.cpp
 ALL_SRCS = $(CLI_SRCS) $(LIB_SRCS)
 HDRS = include/spclust/hac.h tools/readdb.h tools/cli_config.h
@@ -47,9 +49,13 @@ DATA = sim.csv
 BIN  = spclust
 
 LIB_A    = libspclust.a
+# 共享库给 FFI 用（ctypes 那条测试要它）。macOS 上用 -shared 出来的也是 Mach-O dylib，
+# 所以名字统一用 .so，两边都能 dlopen。
+SHARED_A = libspclust.so
 CUT_TEST = cut_property
+C_API_TEST = c_api_test
 
-.PHONY: all lib run test test-cut test-scipy check asan asan-cases leaks bench bench-update clean help
+.PHONY: all lib lib-shared run test test-cut test-scipy test-c check asan asan-cases leaks bench bench-update clean help
 
 all: $(BIN)
 
@@ -66,12 +72,17 @@ $(LIB_A): $(LIB_SRCS) $(HDRS)
 
 lib: $(LIB_A)
 
+$(SHARED_A): $(LIB_SRCS) $(HDRS)
+	$(CXX) $(CXXFLAGS) -fPIC -shared $(INCS) $(DEFS) -o $@ $(LIB_SRCS) $(LDLIBS)
+
+lib-shared: $(SHARED_A)
+
 run: $(BIN)
 	./$(BIN) $(DATA) --linkage $(LINKAGE)
 
 # 差分测试（CLI 侧）：独立 oracle 与 spclust 逐次合并比对，一个二进制覆盖三种 linkage
 # 属性测试（库侧）：三个切树接口，期望值从合并树自底向上独立算出
-test: $(BIN) test-cut
+test: $(BIN) test-cut test-c
 	$(PYTHON) tests/run_tests.py --bin ./$(BIN) --min-sim $(MIN_SIM)
 	$(PYTHON) tests/test_cli.py --bin ./$(BIN)
 	$(SCIPY_PYTHON) tests/test_scipy.py --bin ./$(BIN)
@@ -86,6 +97,15 @@ test-cut: $(CUT_TEST)
 SCIPY_PYTHON ?= $(PYTHON)
 test-scipy: $(BIN)
 	$(SCIPY_PYTHON) tests/test_scipy.py --bin ./$(BIN)
+
+# C API：先用 **C 编译器**编测试（验证头文件真的是纯 C），再用 ctypes 从 Python 调
+#（验证共享库能 dlopen、符号名与结构体布局对得上、异常不穿过 C 边界）。
+test-c: $(LIB_A) $(SHARED_A)
+	$(CC) -std=c11 -Wall -Wextra -Iinclude -c tests/test_c_api.c -o .c_api.o
+	$(CXX) $(CXXFLAGS) -o $(C_API_TEST) .c_api.o $(LIB_A) $(LDLIBS)
+	rm -f .c_api.o
+	./$(C_API_TEST)
+	$(PYTHON) tests/test_c_api.py --lib ./$(SHARED_A)
 
 # 性能回归护栏：固定生成器的输入 + 交替重复取中位，与 tests/bench_baseline.txt 比。
 # 超出容差只警告，超过 3x 时间 / 2x 内存才失败（机器噪声大，硬判定会误报）。
@@ -133,13 +153,13 @@ leaks: $(BIN)
 	MallocStackLogging=1 leaks --atExit -- ./$(BIN) $(DATA)
 
 clean:
-	rm -f $(BIN) $(BIN)-asan $(LIB_A) $(CUT_TEST) *.o
+	rm -f $(BIN) $(BIN)-asan $(LIB_A) $(SHARED_A) $(CUT_TEST) $(C_API_TEST) *.o
 	rm -rf .libobj
 	rm -rf $(BIN)*.dSYM
 	find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 
 help:
-	@echo "make [all|run|test|test-cut|test-scipy|bench|check|asan|asan-cases|leaks|clean|help]"
+	@echo "make [all|run|test|test-cut|test-scipy|test-c|lib|lib-shared|bench|check|asan|asan-cases|leaks|clean|help]"
 	@echo "  LINKAGE=$(LINKAGE)  MIN_SIM=$(MIN_SIM)  DEBUG=$(DEBUG)"
 	@echo "  e.g. make run LINKAGE=1 MIN_SIM=60"
 	@echo "       make test MIN_SIM=70"

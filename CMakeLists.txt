@@ -2,7 +2,7 @@
 # Copyright (c) 2022-2026 Ryan Ma <pningma@sina.com>
 
 cmake_minimum_required(VERSION 3.16)
-project(spclust VERSION 0.3.1 LANGUAGES CXX
+project(spclust VERSION 0.3.2 LANGUAGES CXX C
         DESCRIPTION "基于稀疏相似度矩阵的凝聚型层次聚类")
 
 # ---------------------------------------------------------------------------
@@ -24,7 +24,8 @@ option(SPCLUST_BUILD_TESTS "构建测试并注册 ctest" ${_spclust_default})
 # ---------------------------------------------------------------------------
 # 库（只有 src/hac.cpp；不依赖 tools/）
 # ---------------------------------------------------------------------------
-add_library(spclust src/hac.cpp src/scipy.cpp)
+set(SPCLUST_LIB_SOURCES src/hac.cpp src/scipy.cpp src/spclust_c.cpp)
+add_library(spclust ${SPCLUST_LIB_SOURCES})
 add_library(spclust::spclust ALIAS spclust)
 
 target_compile_features(spclust PUBLIC cxx_std_17)
@@ -104,6 +105,24 @@ if(SPCLUST_BUILD_TESTS)
     add_executable(cut_property tests/test_cut.cpp)
     target_link_libraries(cut_property PRIVATE spclust::spclust)
     add_test(NAME cut_property COMMAND cut_property)
+
+    # C API：这个测试用 **C 编译器**编，所以它同时验证头文件是纯 C。
+    # CMake 会自动用 C 编译器处理 .c、用 C++ 链接（因为库是 C++）。
+    add_executable(c_api tests/test_c_api.c)
+    target_link_libraries(c_api PRIVATE spclust::spclust)
+    set_property(TARGET c_api PROPERTY C_STANDARD 11)
+    add_test(NAME c_api COMMAND c_api)
+
+    # FFI：同一个库再编一份共享库，用 ctypes 从 Python 调
+    add_library(spclust_shared SHARED ${SPCLUST_LIB_SOURCES})
+    target_include_directories(spclust_shared PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
+    target_compile_features(spclust_shared PUBLIC cxx_std_17)
+    add_test(NAME c_api_ffi
+             COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_c_api.py
+                     --lib $<TARGET_FILE:spclust_shared>)
+    set_tests_properties(c_api_ffi PROPERTIES
+                         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
 
     # 差分测试：独立 oracle 逐次合并比对 + CLI 契约测试。
     # 链接方式现在是运行时的，所以一个二进制 --linkage 0/1/2 就覆盖三种。

@@ -8,6 +8,7 @@
 | 差分测试 | `tests/run_tests.py` + `tests/oracle.py` | 合并序列对不对（算法） | `PASS=90 WARN=12 FAIL=0` |
 | CLI 契约测试 | `tests/test_cli.py` | 退出码、选项、输出不变量 | `11/11` |
 | scipy 互操作 | `tests/test_scipy.py` | 格式与语义真的对得上（用真 scipy 当尺子） | 46 组 |
+| C API | `tests/test_c_api.c` + `tests/test_c_api.py` | C 头文件是纯 C、ABI 与错误码契约、FFI 能 dlopen | 64 + 31 项 |
 | 性能回归护栏 | `tests/bench.py` | 变慢没有（防退化） | 5 个用例 |
 
 前三个都在 `make test` / `ctest` 里，第四个是 `make bench`。
@@ -27,6 +28,14 @@
 
 顺带一个结构性证据：`nm libspclust.a` 的 `.data`/`.bss` 里没有算法状态
 （只有字符串与跳转表这类常量），所以多个 `HAC` 对象之间不存在隐藏共享。
+
+## C API（真 C 编译器 + 真 FFI）
+
+`tests/test_c_api.c` 是**真 C**（用 `$(CC)` 编），所以它顺手验证了头文件确实是纯 C、
+`extern "C"` 的符号在 C 侧可用。`tests/test_c_api.py` 再用 ctypes 从 Python 调同一个库
+编出来的共享库，验证动态加载、符号名、结构体布局，以及最重要的一条：**C++ 异常不穿过
+C 边界** —— 从 Python 传一个自环，必须拿到 `SPCLUST_ERR_INVALID_ARGUMENT` 而不是
+让进程 abort。
 
 ## scipy 互操作（换一把外来尺子）
 
