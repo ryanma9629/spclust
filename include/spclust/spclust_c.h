@@ -63,7 +63,7 @@ extern "C" {
 
 #define SPCLUST_VERSION_MAJOR 0
 #define SPCLUST_VERSION_MINOR 3
-#define SPCLUST_VERSION_PATCH 2
+#define SPCLUST_VERSION_PATCH 3
 
 /* Runtime version string, e.g. "0.3.2" */
 const char* spclust_version(void);
@@ -112,6 +112,17 @@ spclust_status spclust_hac_reserve(spclust_hac* h, size_t n_objects, size_t n_ed
 /* Feed one edge. */
 spclust_status spclust_hac_add_edge(spclust_hac* h, uint32_t a, uint32_t b,
 									double similarity);
+
+/* Feed `count` edges in one call: a[i], b[i], sim[i] for i in 0..count-1.
+ * Equivalent to calling spclust_hac_add_edge for each i, but one foreign call instead of
+ * count of them - which is what makes this usable from another language at all, since a
+ * cross-language call costs microseconds while the work per edge is nanoseconds.
+ * On the first invalid edge it returns that edge's status; **edges before it have already
+ * been added** (this is not transactional). To locate the offender, scan the arrays with
+ * the same rules (self-loop, negative, NaN).
+ * `a`, `b` and `sim` may be NULL when count == 0. */
+spclust_status spclust_hac_add_edges(spclust_hac* h, const uint32_t* a, const uint32_t* b,
+									 const double* sim, size_t count);
 
 /* Compute the merge tree. floor <= 0 computes the whole tree. */
 spclust_status spclust_hac_build(spclust_hac* h, double floor);

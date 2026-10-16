@@ -8,7 +8,8 @@ Six layers, each watching something different:
 | differential test | `tests/run_tests.py` + `tests/oracle.py` | whether the merge sequence is right (the algorithm) | `PASS=90 WARN=12 FAIL=0` |
 | CLI contract test | `tests/test_cli.py` | exit codes, options, output invariants | `11/11` |
 | scipy interop | `tests/test_scipy.py` | format and semantics really line up (real scipy as the ruler) | 46 combinations |
-| C API | `tests/test_c_api.c` + `tests/test_c_api.py` | the header is plain C, the ABI and error contract, FFI can dlopen it | 64 + 31 checks |
+| C API | `tests/test_c_api.c` + `tests/test_c_api.py` | the header is plain C, the ABI and error contract, FFI can dlopen it | 74 + 31 checks |
+| Python binding | `tests/test_python.py` | results agree with the CLI, and the things a binding gets wrong (dtypes, strides, lifetimes, the GIL, error messages) | 42 checks |
 | performance guard | `tests/bench.py` | that it has not got slower (anti-regression) | 5 cases |
 
 The first five are inside `make test` / `ctest`; the sixth is `make bench`.
@@ -34,6 +35,29 @@ runs byte for byte - the property that mattered most after moving 34 file static
 One structural piece of evidence comes along for free: `.data`/`.bss` of `libspclust.a`
 (according to `nm`) contains no algorithm state, only constants such as string literals and jump
 tables, so `HAC` objects cannot secretly share anything.
+
+## Python binding
+
+`tests/test_python.py` drives the binding the way a user would, and the strongest check in it is
+also the simplest: for **every** case and **every** linkage, the tree and the flat partition are
+compared against the same library driven from the command line - 138 comparisons. If the binding
+dropped a column, reordered a struct field or lost precision, that check fails (it did, once: the
+4th column of `tree()` was cohesion instead of size).
+
+Around that it covers the things that are easy to get wrong in a binding rather than in the
+algorithm: inputs as lists, `array.array`, memoryviews, int32/int64/float32 numpy arrays and
+**non-contiguous** arrays; batch feeding against per-edge feeding; shuffled edges giving the same
+tree; `labels_` covering every object with sizes summing to n; all three cut modes; `to_scipy()`
+matching the CLI's `--scipy --scipy-bridge` output on all 46 matrices; scipy accepting what comes
+out and `cut_n_clusters` agreeing with `fcluster(maxclust=...)` on a complete tree; error
+messages that name the offending index inside a batch; `close()` being idempotent, one handle
+surviving another's destruction, and `reset()` reuse; and that another thread keeps making
+progress while `build()` runs (ctypes releases the GIL for the call, which is worth asserting
+rather than assuming).
+
+It skips itself and returns 0 when numpy or the shared library are missing, so `make test` works
+without either - which also means a "passing" run in a bare environment has checked nothing, so
+the CI installs numpy.
 
 ## C API (real C compiler + real FFI)
 

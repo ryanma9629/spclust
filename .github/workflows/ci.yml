@@ -15,7 +15,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Needed by the scipy interop test (it skips itself when absent)
+      - name: Needed by the scipy interop and Python binding tests (both skip when absent)
         run: python3 -m pip install --quiet --disable-pip-version-check numpy scipy
 
       - name: Configure

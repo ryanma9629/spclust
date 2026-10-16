@@ -162,6 +162,27 @@ spclust_status spclust_hac_add_edge(spclust_hac* h, uint32_t a, uint32_t b,
 	}
 }
 
+spclust_status spclust_hac_add_edges(spclust_hac* h, const uint32_t* a, const uint32_t* b,
+									const double* sim, size_t count) {
+	if (!h)
+		return fail(SPCLUST_ERR_INVALID_ARGUMENT, "handle is NULL");
+	if (count && (!a || !b || !sim))
+		return fail(SPCLUST_ERR_INVALID_ARGUMENT, "a, b and sim must not be NULL when count > 0");
+	clear_error();
+	try {
+		spclust::HAC* hac = reinterpret_cast<spclust::HAC*>(h);
+		//Single linkage only accumulates an edge list, so it can reserve once up front and
+		//skip the growth of that vector entirely. The greedy path has no such hint.
+		if (spclust::Linkage::MaxSimilarity == hac->linkage())
+			hac->reserve(0, count);
+		for (size_t i = 0; i < count; i++)
+			hac->add_edge(a[i], b[i], sim[i]);
+		return SPCLUST_OK;
+	} catch (...) {
+		return fail_from_exception();
+	}
+}
+
 spclust_status spclust_hac_build(spclust_hac* h, double floor) {
 	if (!h)
 		return fail(SPCLUST_ERR_INVALID_ARGUMENT, "handle is NULL");

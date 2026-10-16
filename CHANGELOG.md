@@ -9,6 +9,24 @@ the git history, where each commit is independently revertible.
 
 ## [0.3.3] - 2026-10
 
+### Added
+
+- **Python binding** (`python/spclust`, ctypes over the C API): `HAC(linkage).add_edges(rows,
+  cols, sims).build()`, then `cut(t)` / `cut_n_clusters(k)` / `cut_min_size(m)` returning a
+  `Cut` with `labels_` (one cluster id per object, the scipy/sklearn convention), `groups`,
+  `cohesion` and `sizes()`, plus `to_scipy()` for `fcluster`/`dendrogram`. numpy arrays,
+  `array.array`, memoryviews and lists are all accepted, a contiguous numpy array is passed
+  through without a copy, and numpy is optional. The GIL is released while the library runs.
+  This is what makes the O(nnz) memory actually reachable from Python:
+  `scipy.cluster.hierarchy.linkage` needs a dense matrix, i.e. O(n^2) before any work.
+- `spclust_hac_add_edges` in the C API: feed a whole edge list in one call. Without it a
+  binding pays one foreign call per edge, which costs microseconds against nanoseconds of work -
+  measured, that is the difference between usable and useless for a few million edges.
+- `tests/test_python.py`: the binding is compared against the same library driven from the
+  command line on every case and linkage (tree and partition), plus dtypes, strides, batch vs
+  per-edge, shuffled-edge reproducibility, lifetimes, error messages and GIL release. 42 checks;
+  skips and returns 0 without numpy.
+
 ### Changed
 
 - **Ties are now specified by id instead of being "unspecified".** Among pairs tied on the highest
@@ -39,9 +57,16 @@ the git history, where each commit is independently revertible.
 
 ### Notes
 
+- `HDRS` in the Makefile listed only one public header, so editing `scipy.h` or `spclust_c.h`
+  did not trigger a rebuild - which is how a stale library reported a stale version. It now globs
+  all of them, and CMake lists the headers as target sources for the same reason.
+
+### Notes
+
 - Re-verified after this change: differential `PASS=102 WARN=0` (was `PASS=90 WARN=12`), cut
-  property `PASS=18288 FAIL=0`, CLI 11/11, C API 64+31, scipy interop 46 combinations, ASan/UBSan
-  clean, ctest 6/6, and the benchmark still matches the recorded baseline.
+  property `PASS=18288 FAIL=0`, CLI 11/11, C API 74+31, Python binding 42, scipy interop 46
+  combinations, ASan/UBSan clean, ctest 7/7, and the benchmark still matches the recorded
+  baseline.
 
 ## [0.3.2] - 2026-10
 

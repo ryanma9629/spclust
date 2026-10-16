@@ -50,7 +50,7 @@ static spclust_hac* build_small(int linkage) {
 
 static void test_version_and_names(void) {
 	check(spclust_version() != NULL && strlen(spclust_version()) > 0, "the version string is non-empty");
-	check(strcmp(spclust_version(), "0.3.2") == 0, "the version matches the header macros");
+	check(strcmp(spclust_version(), "0.3.3") == 0, "the version matches the header macros");
 	check(SPCLUST_VERSION_MAJOR == 0 && SPCLUST_VERSION_MINOR == 3,
 		  "the version macros exist in the header");
 	check(spclust_linkage_from_name("average") == SPCLUST_LINKAGE_AVERAGE, "the name average");
@@ -90,6 +90,64 @@ static void test_error_paths(void) {
 	check(spclust_hac_linkage(h) == SPCLUST_LINKAGE_AVERAGE, "the linkage id");
 	check(strcmp(spclust_hac_linkage_name(h), "average") == 0, "the linkage name");
 	spclust_hac_free(h);
+}
+
+static void test_add_edges_batch(void) {
+	/* The batch entry must be exactly equivalent to the per-edge loop. */
+	uint32_t a[N_EDGES], b[N_EDGES];
+	double s[N_EDGES];
+	for (size_t i = 0; i < N_EDGES; i++) {
+		a[i] = EDGES[i].a;
+		b[i] = EDGES[i].b;
+		s[i] = EDGES[i].s;
+	}
+
+	spclust_hac* one = spclust_hac_new(SPCLUST_LINKAGE_AVERAGE);
+	spclust_hac* batch = spclust_hac_new(SPCLUST_LINKAGE_AVERAGE);
+	check(one && batch, "two handles for the batch comparison");
+	if (!one || !batch)
+		return;
+	for (size_t i = 0; i < N_EDGES; i++)
+		spclust_hac_add_edge(one, a[i], b[i], s[i]);
+	check(spclust_hac_add_edges(batch, a, b, s, N_EDGES) == SPCLUST_OK, "add_edges returns OK");
+	check(spclust_hac_build(one, 0.0) == SPCLUST_OK &&
+		  spclust_hac_build(batch, 0.0) == SPCLUST_OK, "both build");
+
+	size_t n1 = spclust_hac_tree_size(one), n2 = spclust_hac_tree_size(batch);
+	check(n1 == n2 && n1 == N_OBJECTS - 1, "same number of rows");
+	if (n1 == n2) {
+		spclust_merge* r1 = malloc(n1 * sizeof *r1);
+		spclust_merge* r2 = malloc(n2 * sizeof *r2);
+		if (r1 && r2 && spclust_hac_tree(one, r1, n1, &n1) == SPCLUST_OK &&
+			spclust_hac_tree(batch, r2, n2, &n2) == SPCLUST_OK) {
+			int same = 1;
+			for (size_t i = 0; i < n1; i++)
+				if (r1[i].left != r2[i].left || r1[i].right != r2[i].right ||
+					r1[i].similarity != r2[i].similarity || r1[i].size != r2[i].size ||
+					r1[i].cohesion != r2[i].cohesion)
+					same = 0;
+			check(same, "batch and per-edge trees are identical");
+		}
+		free(r1);
+		free(r2);
+	}
+	/* count == 0 (arrays may be NULL) and the argument checks */
+	check(spclust_hac_add_edges(batch, NULL, NULL, NULL, 0) == SPCLUST_OK, "count 0 is a no-op");
+	check(spclust_hac_add_edges(batch, NULL, b, s, 3) == SPCLUST_ERR_INVALID_ARGUMENT,
+		  "NULL array with count > 0 -> argument error");
+	check(spclust_hac_add_edges(NULL, a, b, s, 3) == SPCLUST_ERR_INVALID_ARGUMENT,
+		  "NULL handle -> argument error");
+	/* an invalid edge inside a batch is reported */
+	spclust_hac* bad = spclust_hac_new(SPCLUST_LINKAGE_AVERAGE);
+	double wrong[N_EDGES];
+	for (size_t i = 0; i < N_EDGES; i++) wrong[i] = EDGES[i].s;
+	wrong[3] = -1.0;
+	check(spclust_hac_add_edges(bad, a, b, wrong, N_EDGES) == SPCLUST_ERR_INVALID_ARGUMENT,
+		  "a negative similarity inside a batch -> argument error");
+	check(spclust_last_error() != NULL, "and it has a message");
+	spclust_hac_free(bad);
+	spclust_hac_free(one);
+	spclust_hac_free(batch);
 }
 
 static void test_tree(void) {
@@ -257,6 +315,7 @@ int main(void) {
 	printf("--------------------------------------------------------------------\n");
 	test_version_and_names();
 	test_error_paths();
+	test_add_edges_batch();
 	test_tree();
 	test_cuts();
 	test_reset_and_instances();

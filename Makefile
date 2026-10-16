@@ -43,7 +43,10 @@ DEFS = -DMIN_SIM_CLUST=$(MIN_SIM) -DDEBUG=$(DEBUG)
 LIB_SRCS = src/hac.cpp src/scipy.cpp src/spclust_c.cpp
 CLI_SRCS = tools/spclust_cli.cpp tools/readdb.cpp
 ALL_SRCS = $(CLI_SRCS) $(LIB_SRCS)
-HDRS = include/spclust/hac.h tools/readdb.h tools/cli_config.h
+# Every header, not just the one the library used to be: leaving a public header out
+# means editing it does not trigger a rebuild, and a stale library then reports a stale
+# version or misses a new entry point.
+HDRS = $(wildcard include/spclust/*.h) tools/readdb.h tools/cli_config.h
 INCS = -Iinclude -Itools
 DATA = sim.csv
 BIN  = spclust
@@ -55,7 +58,7 @@ SHARED_A = libspclust.so
 CUT_TEST = cut_property
 C_API_TEST = c_api_test
 
-.PHONY: all lib lib-shared run test test-cut test-scipy test-c check asan asan-cases leaks bench bench-update clean help
+.PHONY: all lib lib-shared run test test-cut test-scipy test-c test-py check asan asan-cases leaks bench bench-update clean help
 
 all: $(BIN)
 
@@ -82,7 +85,7 @@ run: $(BIN)
 
 # Differential test (CLI side): an independent oracle vs spclust merge by merge; one binary, three linkages
 # Property test (library side): the three cut entry points, expectations derived from the tree bottom-up
-test: $(BIN) test-cut test-c
+test: $(BIN) test-cut test-c test-py
 	$(PYTHON) tests/run_tests.py --bin ./$(BIN) --min-sim $(MIN_SIM)
 	$(PYTHON) tests/test_cli.py --bin ./$(BIN)
 	$(SCIPY_PYTHON) tests/test_scipy.py --bin ./$(BIN)
@@ -97,6 +100,11 @@ test-cut: $(CUT_TEST)
 SCIPY_PYTHON ?= $(PYTHON)
 test-scipy: $(BIN)
 	$(SCIPY_PYTHON) tests/test_scipy.py --bin ./$(BIN)
+
+# Python binding (ctypes over the C API). Needs numpy for the array path; the test skips
+# itself and returns 0 when numpy or the shared library is missing.
+test-py: $(SHARED_A)
+	PYTHONPATH=python $(PYTHON) tests/test_python.py
 
 # C API: compile the test with a **C compiler** (proving the header is plain C), then call
 # it from Python via ctypes (dlopen, symbol names, struct layout, the exception boundary).

@@ -135,6 +135,43 @@ group number is naturally the node id. **Note that `height` is a similarity (hig
 first), while scipy uses a distance.** The semantics and cost of `--cut` / `--floor` are in
 [docs/design.md](docs/design.md).
 
+## Python
+
+```python
+import numpy as np, spclust
+
+h = spclust.HAC("average")            # or "max-similarity" / "min-nonzero"
+h.add_edges(rows, cols, sims)         # the whole edge list in one call
+h.build()                             # full merge tree; the GIL is released while it runs
+
+labels = h.cut(50.0).labels_          # cut wherever you like - never re-clusters
+c = h.cut_n_clusters(12)              # or ask for exactly 12 clusters
+Z = h.to_scipy()                      # scipy linkage matrix, ready for fcluster/dendrogram
+```
+
+That is the whole point of the binding: ``scipy.cluster.hierarchy.linkage`` needs a **dense**
+distance matrix, so its memory is O(n^2) before it does any work - about 9.7 GB at n = 36000, so
+roughly 320 GB at n = 10^5, which is the range this library targets. Measured on the same data:
+n = 12800 was 22 ms / 18.7 MB here against scipy's 1.29 s / 5005 MB.
+
+`Cut` carries `labels_` (one cluster id per object, the scipy/sklearn convention), `groups`,
+`cohesion` and `sizes()`; `HAC` carries `num_objects`, `tree()`, `reset()` and a context
+manager. Inputs may be numpy arrays, `array.array`, memoryviews or plain lists - a numpy array
+that is already contiguous is passed to the library without a copy - and numpy itself is
+optional (without it the results come back as lists).
+
+The package lives in `python/spclust` and needs the shared library:
+
+```bash
+make lib-shared                     # libspclust.so next to the sources
+PYTHONPATH=python python3 -c "import spclust; print(spclust.version())"
+SPCLUST_LIBRARY=/path/to/libspclust.so ...   # or point at an installed one
+make test-py                        # the binding's own test suite (skips without numpy)
+```
+
+Reproducibility comes for free: ties are broken by id, so the same edges with the same ids give
+the same tree in any order, on any machine.
+
 ## C interface (for FFI)
 
 `include/spclust/spclust_c.h` is a **plain C** header (only `<stddef.h>` / `<stdint.h>`), so
@@ -227,7 +264,7 @@ In scipy `height` is a **distance** (smaller merges first) while this library wo
 | [docs/design.md](docs/design.md) | data structures, algorithm, linkage methods, tunables |
 | [docs/known-issues.md](docs/known-issues.md) | bugs that were fixed (and how they were found) + open issues |
 | [docs/performance.md](docs/performance.md) | measurements, optimisations that measurement rejected, methodology |
-| [docs/testing.md](docs/testing.md) | cut properties / differential / CLI / scipy interop / C API (with FFI) / performance guard |
+| [docs/testing.md](docs/testing.md) | cut properties / differential / CLI / scipy interop / C API (with FFI) / Python binding / performance guard |
 | [CHANGELOG.md](CHANGELOG.md) | changes that matter to users |
 
 ## Scale of the testing and performance work

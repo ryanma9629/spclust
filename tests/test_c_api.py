@@ -95,7 +95,7 @@ def main():
         ctypes.POINTER(ctypes.c_size_t), ctypes.POINTER(ctypes.c_size_t)]
     lib.spclust_hac_to_scipy.restype = ctypes.c_int
 
-    check(lib.spclust_version().decode() == "0.3.2", "version string")
+    check(lib.spclust_version().decode() == "0.3.3", "version string")
     check(lib.spclust_linkage_from_name(b"single") == 1, "name lookup")
 
     # ---- bad linkage: must return NULL rather than throw through the C boundary ----

@@ -2,7 +2,7 @@
 # Copyright (c) 2022-2026 Ryan Ma <pningma@sina.com>
 
 cmake_minimum_required(VERSION 3.16)
-project(spclust VERSION 0.3.2 LANGUAGES CXX C
+project(spclust VERSION 0.3.3 LANGUAGES CXX C
         DESCRIPTION "Agglomerative hierarchical clustering over a sparse similarity matrix")
 
 # ---------------------------------------------------------------------------
@@ -25,7 +25,8 @@ option(SPCLUST_BUILD_TESTS "build the tests and register them with ctest" ${_spc
 # The library (no dependency on tools/)
 # ---------------------------------------------------------------------------
 set(SPCLUST_LIB_SOURCES src/hac.cpp src/scipy.cpp src/spclust_c.cpp)
-add_library(spclust ${SPCLUST_LIB_SOURCES})
+file(GLOB SPCLUST_PUBLIC_HEADERS ${CMAKE_CURRENT_SOURCE_DIR}/include/spclust/*.h)
+add_library(spclust ${SPCLUST_LIB_SOURCES} ${SPCLUST_PUBLIC_HEADERS})
 add_library(spclust::spclust ALIAS spclust)
 
 target_compile_features(spclust PUBLIC cxx_std_17)
@@ -114,10 +115,18 @@ if(SPCLUST_BUILD_TESTS)
     add_test(NAME c_api COMMAND c_api)
 
     # FFI: build the same library again as a shared object and call it from Python via ctypes
-    add_library(spclust_shared SHARED ${SPCLUST_LIB_SOURCES})
+    add_library(spclust_shared SHARED ${SPCLUST_LIB_SOURCES} ${SPCLUST_PUBLIC_HEADERS})
     target_include_directories(spclust_shared PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
     target_compile_features(spclust_shared PUBLIC cxx_std_17)
+    # The Python binding on top of the same shared library.
+    add_test(NAME python_binding
+             COMMAND ${CMAKE_COMMAND} -E env PYTHONPATH=${CMAKE_CURRENT_SOURCE_DIR}/python
+                     ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_python.py
+                     --lib $<TARGET_FILE:spclust_shared>)
+    set_tests_properties(python_binding PROPERTIES
+                         WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
+
     add_test(NAME c_api_ffi
              COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_c_api.py
                      --lib $<TARGET_FILE:spclust_shared>)
