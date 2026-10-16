@@ -1,144 +1,159 @@
-# 性能实测与方法学
+# Measurements and methodology
 
-全部数据都是实测的，并且记录了**测错过的几次** —— 机器噪声足以骗过单次测量，
-所以协议（交替执行、≥11 次、最小/下四分位/中位三者一致）和基线都固化进了仓库
-（`make bench`，见 [testing](testing.md)）。
+Every figure here was measured, and the occasions where the measurement was **wrong** are
+recorded too - machine noise is enough to fool a single run. That is why the protocol
+(alternating runs, >= 11 repetitions, min/lower-quartile/median agreeing) and the baseline are
+pinned in the repository (`make bench`, see [testing](testing.md)).
 
-## 性能实测
+## Measurements
 
-编译选项：`-O2`。
+Compiler options: `-O2`.
 
-**读这一节时注意**：绝对墙钟受机器负载影响很大 —— 同一份代码在忙/热与空闲时能差 2 倍
-（哨兵机制见 [testing](testing.md)）。**相对比值是交替执行测出来的，可信**；绝对数字只在
-同一台机器、同一负载条件下可比。规范的基线在 `tests/bench_baseline.txt`（空闲时记录）。
+**A caveat for this whole section**: absolute wall clock depends heavily on machine load - the
+same code can differ by 2x between a busy/hot run and an idle one (the canary mechanism is
+described in [testing](testing.md)). **The ratios come from alternating runs and are
+trustworthy**; absolute numbers are only comparable on the same machine under the same load.
+The canonical baseline is `tests/bench_baseline.txt`, recorded with the machine idle.
 
-### 内存：线性，与稀疏性一致，而且比最初小了一大截
+### Memory: linear, consistent with sparsity, and far below where it started
 
-| 边数 | n | 峰值 RSS | 字节/边 | 相对基线 |
+| Edges | n | Peak RSS | Bytes/edge | vs baseline |
 |---|---|---|---|---|
 | 200k | 20k | 20.7 MB | 104 | -50% |
 | 400k | 40k | 34.3 MB | 86 | -60% |
 | 800k | 80k | 64.2 MB | 80 | -61% |
 | 2M | 200k | 155.2 MB | 78 | -61% |
 
-字节/边趋于恒定 → 十字链表只存 nnz。三次内存优化叠起来：读入端不再缓存全部边（-45~49%）、
-节点 56 → 48 字节（-13.7%）、48 → 32 字节并把池改成 realloc（-17.9%）。
+Bytes per edge converges to a constant, which is what a cross-linked list storing only the
+non-zeros should do. Three memory changes stack up: the reader no longer buffers every edge
+(-45 to -49%), nodes went 56 -> 48 bytes (-13.7%), and 48 -> 32 bytes with the pool switched to
+`realloc` (-17.9%).
 
-### 时间（分段，多次交替执行取最小值；≥11 次）
+### Time (by phase; alternating repetitions, minimum taken, >= 11 runs)
 
-输入：随机稀疏图，n=80000、800,000 条边、平均度 20、相似度 0..100、`MIN_SIM_CLUST=50`。
+Input: a random sparse graph, n = 80000, 800,000 edges, mean degree 20, similarities 0..100,
+`MIN_SIM_CLUST=50`.
 
-| 版本 | 读取 | 初始化 | 聚类 | 合计 | 本轮 | 累计 |
+| Version | Read | Init | Cluster | Total | This step | Cumulative |
 |---|---|---|---|---|---|---|
-| 基线（UAF 修复后） | 0.050 | 0.306 | 5.574 | 5.930 | – | 1.00x |
-| P0-1 增量下标遍历 | 0.049 | 0.316 | 2.475 | 2.840 | 2.07x | 2.07x |
-| P0-2 最大堆 | 0.049 | 0.311 | 0.531 | 0.891 | 3.09x | 6.41x |
-| init 换 `unordered_map` | 0.050 | 0.060 | 0.512 | 0.622 | 1.41x | 9.01x |
-| 去掉 `get_unit` 线性查找 | 0.049 | 0.058 | 0.295 | 0.402 | 1.49x | 13.46x |
-| 读入改流式 + 小批量 | ~0.05(合并) | – | ~0.29 | ~0.40 | ~1.00x | ~14x |
-| 组号改 `uint32`（48B） | ≈0.06 | | ≈0.26 | ≈0.36 | ~1.15x | ~16x |
-| 链接改下标（32B 池） | ≈0.05 | | ≈0.27 | ≈0.33 | ~1.10x | ~18x |
+| baseline (after the UAF fix) | 0.050 | 0.306 | 5.574 | 5.930 | - | 1.00x |
+| P0-1 incremental index walk | 0.049 | 0.316 | 2.475 | 2.840 | 2.07x | 2.07x |
+| P0-2 max-heap | 0.049 | 0.311 | 0.531 | 0.891 | 3.09x | 6.41x |
+| init via `unordered_map` | 0.050 | 0.060 | 0.512 | 0.622 | 1.41x | 9.01x |
+| no `get_unit` linear search | 0.049 | 0.058 | 0.295 | 0.402 | 1.49x | 13.46x |
+| streaming reader + batching | ~0.05 (merged) | - | ~0.29 | ~0.40 | ~1.00x | ~14x |
+| group ids as `uint32` (48B) | ~0.06 | | ~0.26 | ~0.36 | ~1.15x | ~16x |
+| links as indices (32B pool) | ~0.05 | | ~0.27 | ~0.33 | ~1.10x | ~18x |
 
-（前三行是逐版实测；后三行的分段因为流式读入把"读取"和"初始化"合并了，只按合计估列。）
+(The first three rows are per-version measurements; in the last three the streaming reader
+merged "read" into "init", so only totals are estimated.)
 
-累计（各版交替执行取最小）：
+Cumulative, alternating runs with the minimum taken:
 
-| n | 边数 | 时间 基线 | 时间 现在 | 加速 | 内存 基线 | 内存 现在 | 内存 |
+| n | Edges | Time, baseline | Time, now | Speedup | Memory, baseline | Memory, now | Memory |
 |---|---|---|---|---|---|---|---|
 | 20,000 | 200k | 0.435 s | 0.050 s | 8.7x | 41.3 MB | 20.7 MB | **-50%** |
 | 40,000 | 400k | 1.565 s | 0.111 s | 14.2x | 85.5 MB | 34.3 MB | **-60%** |
 | 80,000 | 800k | 5.906 s | 0.270 s | **21.9x** | 163.9 MB | 64.2 MB | **-61%** |
 | 200,000 | 2M | 47.204 s | 0.925 s | **51.1x** | 396.4 MB | 155.2 MB | **-61%** |
 
-### 时间花在哪（当前）
+### Where the time goes now
 
-采样画像（`sample`，1 ms，`-fno-inline` 归因，n=200k / 2M 边）：
+Sampled profile (`sample`, 1 ms, attributed with `-fno-inline`, n = 200k / 2M edges):
 
-| 帧 | 采样数 | |
+| Frame | Samples | |
 |---|---|---|
-| `<deduplicated_symbol>` | 387 | 未符号化的运行时/合并代码块 |
-| `merge_grp()` 自身 | 189 | 行列摘除、更新循环骨架 |
-| `add_grp()` | 131 | 单元初始化 + 两次链插入 + 堆压入 |
-| `__hash_table::emplace_unique` | 101 | 初始化段的名称→id 查找（已优化过一轮）|
-| `set_flag()` | 90 | 标记 + 缓存值登记 |
-| `std::basic_string::__is_long` | 89 | 字符串拷贝（init 建表、成员列表）|
-| malloc/free 相关帧合计 | 223 | 约 13%（但节点池实测无收益，见上）|
+| `<deduplicated_symbol>` | 387 | unsymbolised runtime and merged code blocks |
+| `merge_grp()` itself | 189 | row/column removal, the update loop skeleton |
+| `add_grp()` | 131 | cell initialisation, two chain insertions, the heap push |
+| `__hash_table::emplace_unique` | 101 | name-to-id lookup in init (already optimised once) |
+| `set_flag()` | 90 | marking plus recording the cached values |
+| `std::basic_string::__is_long` | 89 | string copies (building the name table, member lists) |
+| malloc/free-related frames, total | 223 | about 13% (but the node pool measured no gain - see below) |
 | `heap_sift_down()` | 57 | |
-| `__write_nocancel` | 51 | 即使 `DEBUG=0` 也在写最后那几行统计 |
+| `__write_nocancel` | 51 | writing the final few statistics even with `DEBUG=0` |
 
-已经被压平了：没有任何一项超过 25%，没有单一热点。
+It is flat now: nothing exceeds 25% and there is no single hot spot.
 
-### 操作数已经完全线性，剩下的超线性是 cache 效应
+### The operation counts are fully linear; what remains super-linear is cache behaviour
 
-更新循环迭代次数随 n 严格线性（`get_unit` 那 3670 万步曾经同样线性，现在已被消掉）：
+Update-loop iterations scale strictly linearly with n (the 36.7 million `get_unit` steps were
+equally linear and have since been eliminated):
 
-
-
-| 边数 | 更新迭代 | 倍数 | （旧的 `get_unit` 链遍历）|
+| Edges | Update iterations | Factor | (the old `get_unit` chain walk) |
 |---|---|---|---|
-| 100k | 174,906 | – | 4,576,072 |
+| 100k | 174,906 | - | 4,576,072 |
 | 200k | 351,062 | 2.0x | 9,175,748 |
 | 400k | 701,373 | 2.0x | 18,305,037 |
 | 800k | 1,402,219 | 2.0x | 36,673,256 |
 
-但单位时间吞吐从 176 Mops/s（n=10k）掉到 58 Mops/s（n=80k）—— 3 倍衰减。
-所以挂钟时间上看到的 ~n^1.5 是**指针追逐在增长的工作集上不断 cache miss**，
-不是还剩着什么 O(n) 的算法项；而节点池实验说明它也不是分配器开销
-（2.19M 次 malloc/free 全部消掉，时间一点没变）。
+Yet throughput per unit time falls from 176 Mops/s (n = 10k) to 58 Mops/s (n = 80k), a 3x
+decay. So the ~n^1.5 seen in wall clock is **pointer chasing cache-missing on a growing working
+set**, not some remaining O(n) algorithmic term. The node-pool experiment shows it is not
+allocator overhead either (2.19M malloc/free calls eliminated, no change in time whatsoever).
 
-### 其它已排除的假设（都是实测排除的，不是推断）
+### Other hypotheses, all ruled out by measurement rather than by argument
 
-| 怀疑对象 | 实测结论 |
+| Suspect | Measured result |
 |---|---|
-| `malloc`/`free` 开销 | 全部换成节点池后 **0.998x**（800k 边，交替 11 次）→ 约 2%，**不是问题** |
-| `grp[].objs` 的字符串复制 | 对象名 8 字符 vs 64 字符：2.915 vs 2.915 s → **不是问题** |
-| 标记向量的 memset | `size_t` 改 `char`：2.91 → 2.80 s（4%）→ 不是主因 |
-| `get_max` | P0-1 前是次要项，P0-1 后占 57~78%，P0-2 后只剩 6.5% |
-| 对象名 → id 查找 | **是主因**（初始化段 5.3x）→ 已优化 |
-| `get_unit` 线性查找 | **是主因**（占整程序 51%）→ 已优化（聚类段 1.88x）|
-| `LINKAGE_MTD=1` | 2.9 s → **24.0 s**（8.3x）→ 无条件 `add_grp` 导致稠密化是真的 |
+| `malloc`/`free` overhead | a full node pool gave **0.998x** (800k edges, 11 alternating runs) -> about 2%, **not the problem** |
+| string copies in `grp[].objs` | 8-char vs 64-char object names: 2.915 vs 2.915 s -> **not the problem** |
+| memset of the mark vector | `size_t` -> `char`: 2.91 -> 2.80 s (4%) -> not the main cause |
+| `get_max` | minor before P0-1, then 57-78% of clustering, and only 6.5% after P0-2 |
+| object-name to id lookup | **a main cause** (init 5.3x faster) -> optimised |
+| `get_unit` linear search | **a main cause** (51% of the whole program) -> optimised (clustering 1.88x) |
+| `LINKAGE_MTD=1` | 2.9 s -> **24.0 s** (8.3x) -> unconditional `add_grp` densification is real |
 
-## 已尝试但无收益的优化
+## Optimisations that were tried and gave nothing
 
-### 节点池（arena）替换 malloc/free —— 实测 1.00x，已回退
+### Replacing malloc/free with a node arena - measured 1.00x, reverted
 
-理由看起来很强：800k 边时 `add_grp` 被调用 **2,194,304 次**，也就是 219 万对 malloc/free，
-每个单元 56 字节还带分配器元数据。于是实现了“4096 个单元一块 + 空闲链表”，
-并留了 `-DSPCLUST_USE_SYSTEM_MALLOC` 开关让 ASan 仍能检测 use-after-free。
+The argument looked strong: with 800k edges `add_grp` is called **2,194,304 times**, i.e. 2.19
+million malloc/free pairs, each 56-byte cell carrying allocator metadata. So a "4096 cells per
+block plus a free list" pool was implemented, with a `-DSPCLUST_USE_SYSTEM_MALLOC` switch so ASan
+could still detect use-after-free.
 
-**实测没有任何收益。** 交替执行、重复取最小值：
+**It bought nothing.** Alternating runs, minimum taken:
 
-| 规模 | 无池 | 有池 | 加速 |
+| Scale | Without the pool | With the pool | Speedup |
 |---|---|---|---|
-| 800k 边（各 11 次） | 0.5626 s | 0.5638 s | 0.998x |
-| 1.6M 边（各 7 次） | 1.3924 s | 1.3895 s | 1.002x |
+| 800k edges (11 runs each) | 0.5626 s | 0.5638 s | 0.998x |
+| 1.6M edges (7 runs each) | 1.3924 s | 1.3895 s | 1.002x |
 
-峰值内存也完全没变（0.0%）—— 峰值由同一批活单元决定，与怎么分配无关。
+Peak memory did not move either (0.0%) - the peak is set by the same set of live cells
+regardless of how they are allocated.
 
-原因有两层，现在都清楚了：
+There are two layers to why, and both are now clear:
 
-- 采样画像里 **malloc/free 相关帧合计只占约 2%**，小对象分配器本身就很快；
-- 更根本的是：**池不改变 `sizeof(sp_unit)`**，也就是不改变每个节点跨多少个 cache line。
-  而节点尺寸是一阶因素（把节点撑到 128 字节会慢 1.17x，压到 32 字节会快 1.4~1.5x）。
-  所以"换分配器"没用、"压小节点"才有用 —— 这两个实验的结果并不矛盾。
+- malloc/free-related frames are only about **2%** of the sampled profile; the small-object
+  allocator is simply fast;
+- more fundamentally, **the pool does not change `sizeof(sp_unit)`**, so it does not change how
+  many cache lines a node spans. And node size is a first-order factor (padding a node to 128
+  bytes costs 1.17x; squeezing it to 32 bytes gains 1.4-1.5x). So "change the allocator" does
+  nothing while "shrink the node" does - and those two results do not contradict each other.
 
-代价却是真实的：约 60 行额外代码、一套双构建分支，而**默认构建下 ASan 会失去检测
-“单元被 free 之后又被读”的能力** —— 那正是这个代码库里已经出现过两次的 bug 类型。
-收益为零、代价不为零，所以已回退。
+The cost, on the other hand, was real: about 60 extra lines, a second build configuration, and
+**in a default build ASan loses the ability to detect "a cell was freed and then read"** - the
+very bug class that had already appeared twice in this code base. Zero benefit, non-zero cost:
+reverted.
 
-**方法学教训（在这件事上错了两次，都记下来）：**
+**Methodology lessons (two mistakes were made on this one, both recorded):**
 
-1. **必须先交替、再重复。** 我第一次测出 1.31~1.60x 是假的 —— 当时是"先把 A 全跑完再全跑 B"，
-   被负载漂移骗了；同一份代码的两次构建在单次测量下能差 22%。
-2. **重复次数不够会直接给出错误结论。** 56 → 48 字节那件事：7 次测出 +7.7%、5 次测出 −2%，
-   15 次才稳定在 **+20.9%**（最小 / 下四分位 / 中位三个统计量完全一致）。
-   机器上有后台活动，次数少时最小值探不到底，于是结论在噪声里翻来覆去。
-   **现在的规矩：≥11 次交替，且最小/下四分位/中位必须一致才下结论。**
+1. **Alternate first, then repeat.** The first measurement of 1.31-1.60x was fake - it ran all
+   of A and then all of B, and load drift fooled it; two builds of the same code differed by 22%
+   in single measurements.
+2. **Too few repetitions produce confidently wrong conclusions.** On the 56 -> 48 byte change,
+   7 runs said +7.7% and 5 runs said -2%, while 15 runs settled at **+20.9%** (min, lower
+   quartile and median all agreeing). With background activity on the machine, too few runs never
+   reach the true minimum, so the conclusion flips around in the noise.
+   **The rule now: >= 11 alternating runs, and min/lower-quartile/median must agree before any
+   conclusion is drawn.**
 
-   也就是说，上面「节点池」那一节的结论虽然三次复现都为 1.00x、且机制上说得通
-   （池不改变 `sizeof`），但严格讲也该用 ≥11 次重测过才算数。
+   Which means the node-pool conclusion above, although it reproduced 1.00x three times and has a
+   mechanism behind it (the pool does not change `sizeof`), strictly speaking should be re-run
+   with >= 11 repetitions before being treated as settled.
 
-3. **画像是用 `sample` 采样，不是插桩。** 用 `clock()` 给 `get_unit`/`add_grp` 插桩，
-   这两个函数被调用几百万次，插桩本身加入了一千三百万次 `clock()` 调用 ——
-   实测总时间从 0.72 s 涨到 3.00 s，占比数据全失真
-   （用系统自带的采样器，如 `sample`、`perf record` 都行）。
+3. **Profiles come from `sample`, not from instrumentation.** Instrumenting `get_unit`/`add_grp`
+   with `clock()` - functions called millions of times - added thirteen million `clock()` calls;
+   total time went from 0.72 s to 3.00 s and the share data was meaningless (use the system
+   sampler instead: `sample`, `perf record`, or similar).

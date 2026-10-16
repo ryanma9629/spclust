@@ -1,110 +1,130 @@
-# 设计与算法
+# Design and algorithm
 
-本文写内部结构、算法流程和几个语义约定。使用接口见 [README](../README.md)，
-历史与已知问题见 [known-issues](known-issues.md)，性能数据见 [performance](performance.md)。
+This document covers the internal structures, the algorithm and a few semantic conventions.
+For the interface see the [README](../README.md), for history and open issues
+[known-issues](known-issues.md), and for measurements [performance](performance.md).
 
-## 数据结构
+## Data structures
 
-输入是**边表**而不是矩阵：`(obj1, obj2, sim)`，缺失的 pair 视为相似度 0，不存储。
+The input is an **edge list** rather than a matrix: `(obj1, obj2, sim)`, where an absent pair
+counts as similarity 0 and is not stored.
 
 ```
-vec_dim1 (行向量)                 vec_dim2 (列向量)
- row i: { head -> [单元链] , max -> 本行最大值的单元 }
- col j: { head -> [单元链] }
+vec_dim1 (the row vector)         vec_dim2 (the column vector)
+ row i: { head -> [cell chain] , max -> this row's largest cell }
+ col j: { head -> [cell chain] }
 ```
 
-- `sp_unit` 的 `left/right/up/down` 四个链接是**下标**（不是指针），行链和列链共用同一批节点；
-  全部节点放在一块连续内存里，`sizeof(sp_unit)` 32 字节。
-- **只存上三角**：`add_grp()` 强制 `group1 < group2`（小的当行、大的当列）。
-- 每行维护一个 `max` 指针 —— 这是关键优化：`get_max()` 只扫"每行的 max"这一列指针，
-  复杂度是 O(组数) 而不是 O(nnz)。
+- A `sp_unit`'s four links (`left/right/up/down`) are **indices**, not pointers, and the row
+  and column chains share the same cells. All cells live in one contiguous block, with
+  `sizeof(sp_unit)` at 32 bytes.
+- **Only the upper triangle is stored**: `add_grp()` enforces `group1 < group2` (the smaller
+  becomes the row, the larger the column).
+- Every row keeps a `max` pointer. This is the key optimisation: `get_max()` only scans the
+  column of per-row maxima, so it is O(number of groups) rather than O(nnz).
 
-## 算法流程
+## Algorithm
 
 ```
 build(floor)                        src/hac.cpp
-  add_edge(a, b, sim)               每出现一个新 id 就登记一个单元素组；边插进结构
-  while (组数 > 1):
-      unit = get_max()              全局最大相似度单元（堆顶，摊还 O(1)）
-      if (无单元 || sim < floor) break
+  add_edge(a, b, sim)               register a singleton group per new id; insert the edge
+  while (groups > 1):
+      unit = get_max()              the globally largest cell (heap top, amortised O(1))
+      if (no cell || sim < floor) break
       merge_grp(group1, group2, sim)
 ```
 
-`merge_grp()` 四步：
+`merge_grp()` has four steps:
 
-1. 遍历 group1/group2 的行链和列链，把需要重算的**行/列下标收进一个复用的小数组**
-   （不是扫整个索引空间）、并标记 `max` 指针失效的行 —— 稀疏性的价值所在。
-2. 按 linkage 方式算出新组与各邻居的相似度，新组 id 追加在末尾（`grp.size()`）；
-   顺带把这一对相似度也记进 `marks`，所以下一步不需要再做链查找。
-3. 摘除并释放 group1/group2 的整行整列，做四向指针 splice，最后释放中心节点。
-4. 重扫失效的行修复 `max` 指针；把这一次合并记进 `merges`（就是 linkage 矩阵）。
+1. Walk group1's and group2's row and column chains, collecting the **row/column indices that
+   need recomputing into one reused small array** (rather than scanning the whole index space)
+   and marking the rows whose `max` pointer is invalidated. This is where sparsity pays off.
+2. Compute the new group's similarity to each neighbour according to the linkage, appending the
+   new group id at the end (`grp.size()`). The two similarities recorded along the way are also
+   stored in `marks`, so the next step needs no chain lookups.
+3. Remove and release group1's and group2's entire row and column with four-way pointer
+   splicing, releasing the centre cell last.
+4. Rescan the invalidated rows to repair their `max` pointers, and record this merge in
+   `merges` (which is the linkage matrix).
 
-单链接（`Linkage::MaxSimilarity`）走的是另一条路：簇间相似度就是两个簇之间所有**原始边**的
-最大值，所以整棵树等价于"边按相似度降序 + 并查集"（Kruskal），完全不建矩阵。
-见 [performance](performance.md)。
+Single linkage (`Linkage::MaxSimilarity`) takes a different route: its inter-cluster
+similarity is the maximum over all **original edges** between two clusters, so the whole tree
+is equivalent to "sort the edges by similarity descending, then union-find" (Kruskal), never
+building the matrix at all. See [performance](performance.md).
 
-## 链接方式
+## Linkage methods
 
-三种，构造 `HAC` 时给。**命名按相似度语义**，而且注意原来代码里的注释是反的
-（把 max 注释成 complete、把 min 注释成 single），这里以行为为准：
+There are three, given when constructing a `HAC`. The names follow **similarity** semantics,
+and note that the comments in the original code were the wrong way round (it called max
+"complete" and min "single"); behaviour is what counts here:
 
-| `Linkage` | 簇间相似度 | 按距离语义是 | 备注 |
+| `Linkage` | Inter-cluster similarity | In distance terms | Notes |
 |---|---|---|---|
-| `Average` | 全部 `|A|×|B|` 对的平均（缺失边算 0） | average | 簇越大越容易被"稀释" |
-| `MaxSimilarity` | 取最大 | **单链接** | 会产生 chaining；值只可能是原始边，所以走 Kruskal |
-| `MinNonzero` | 取最小，但仅当两边都有边 | 全链接的保守变体 | 缺失边不参与，否则 min 恒为 0 |
+| `Average` | the mean over all `|A|x|B|` pairs (missing edges count as 0) | average | larger clusters get diluted |
+| `MaxSimilarity` | the maximum | **single** | it chains; its values can only be original edges, so it uses Kruskal |
+| `MinNonzero` | the minimum, but only where both sides have an edge | a conservative complete | missing edges do not participate; otherwise min would be identically 0 |
 
-`MinNonzero` **不是**标准 complete linkage：稀疏图上把缺失边当 0 会让 min 恒为 0、
-失去意义，所以这里只对"两边都存在的边"取 min，名字也就显式写成 `MinNonzero`。
-它的一个后果是**可能留下永远合不起来的分量**（两簇之间没有边 ⇒ 这对不是候选），
-于是树可能是残缺的 —— `cut_n_clusters` / `cut_min_size` 在这种情况下返回树能给出的
-最细切法。另外它的"组内紧致度"初值是空集的 +∞（`empty_cohesion`），
-因为 0 是 min 的吸收元、会让报告恒为 0。
+`MinNonzero` is **not** standard complete linkage: on a sparse matrix treating missing edges
+as 0 makes the minimum identically 0 and meaningless, so only pairs where **both sides have an
+edge** participate - hence the explicit name. One consequence is that it can leave
+**components that never merge** (two clusters with no edge between them are not even a
+candidate), so the tree may be incomplete; `cut_n_clusters` / `cut_min_size` then return the
+finest cut the tree supports. Its intra-cluster tightness is also initialised to the +inf of
+the empty set (`empty_cohesion`), because 0 is the absorbing element of min and would make the
+report identically 0.
 
-## 状态与实例
+## State and instances
 
-原来这里是 **34 个文件静态变量 + 一堆静态函数** —— 一个进程只能跑一次聚类，
-换链接方式还得重新编译。现在这些状态都在 `spclust::detail::HACImpl` 里，
-公开的头文件只有一个 `class HAC`（内部持一个 `unique_ptr`）：
+This used to be **34 file-static variables plus a pile of static functions**: one clustering
+per process, and changing the linkage meant recompiling. All of that state now lives in
+`spclust::detail::HACImpl`, and the public header exposes a single `class HAC` (holding a
+`unique_ptr`):
 
-- **一个对象 = 一份状态**：同一进程可以有任意多个聚类，交错喂边、交错 `build()`，
-  结果与单独跑完全一致（`tests/test_cut.cpp` 里专门测了这条，包括 reset 复用）。
-- **库里没有可变全局量**：`nm libspclust.a` 的 `.data`/`.bss` 里只有 C++ 运行时的
-  常量（字符串、跳转表），没有算法状态。所以只要不共享同一个对象，多线程就是安全的。
-- **链接方式运行时选**：`HAC(Linkage)`。分派只发生在公开入口（`add_edge` / `build` /
-  `cut` / …），内层循环里链接方式是已知的同一个函数内联体，热路径上不留分支 ——
-  实测代价 0.2~0.6%（交替 A/B，最小/四分位/中位一致）。
-- **切树是纯函数**：并查集的父数组是 `cut()` 的局部量。以前它是文件静态量，
-  于是 `cut()` 名义上 const 却在改全局状态，并发切树会互相踩。
+- **One object, one state**: a process can hold any number of clusterings, interleaving edges
+  and `build()` calls, and the results are identical to running each alone (tested explicitly
+  in `tests/test_cut.cpp`, including reset reuse).
+- **No mutable globals in the library**: `.data`/`.bss` of `libspclust.a` according to `nm`
+  contains only C++ runtime constants (string literals, jump tables), no algorithm state. So
+  multi-threading is safe as long as no single object is shared.
+- **The linkage is chosen at run time**: `HAC(Linkage)`. Dispatch happens only at the public
+  entry points (`add_edge` / `build` / `cut` / ...), while the inner loops stay in one function
+  where the linkage is known, leaving no branch in the hot path - a measured cost of 0.2-0.6%
+  (alternating A/B, min/quartile/median agreeing).
+- **Cutting is a pure function**: the union-find parent array is a local of `cut()`. It used to
+  be a file static, which made `cut()` nominally `const` while mutating global state and let
+  concurrent cuts corrupt each other.
 
-## 切树
+## Cutting
 
-树是完整保留的（`build(floor)` 的 `floor` 只决定"算到多低"），所以阈值只是"切在哪"，
-换切法不需要重新聚类。三个接口都归约到"取前 use 次合并"这一步：
+The tree is kept in full (the `floor` argument of `build()` only decides how far down to
+compute it), so a threshold is only "where to cut" and changing the cut never re-clusters.
+All three entry points reduce to "take the first `use` merges":
 
-| 接口 | 语义 | 需要的树 |
+| Entry point | Semantics | Tree needed |
 |---|---|---|
-| `cut(t)` | 取所有 `similarity >= t` 的合并（并列会一起进来） | 算到 `t` 即可 |
-| `cut_n_clusters(k)` | 正好 k 个簇 = 取前 `n-k` 次合并 | 要够深，拿不到 k 个就给最细的 |
-| `cut_min_size(m)` | "所有簇都 >= m"的**最浅**切法 | 要够深 |
+| `cut(t)` | every merge with `similarity >= t` (ties come along) | only down to `t` |
+| `cut_n_clusters(k)` | exactly k clusters = the first `n-k` merges | deep enough; otherwise the finest available |
+| `cut_min_size(m)` | the **shallowest** cut where every cluster is >= m | deep enough |
 
-`cut_min_size` 不是"丢掉小簇"，而是"继续合并直到没有小簇"。注意有三种链接语义下
-**两簇之间可以根本没有边**（`MinNonzero` 下这种 pair 连候选都不是），于是可能留下
-互不相连的分量永远合不起来 —— 这时它返回树能给出的最细切法。
+`cut_min_size` is not "discard small clusters" but "keep merging until there are none". Note
+that under all three semantics **two clusters can have no edge at all** (under `MinNonzero`
+such a pair is not even a candidate), so disconnected components may never merge - in which
+case it returns the finest cut the tree supports.
 
-## 可调参数
+## Tunables
 
-**库本体没有编译期选项**（链接方式是构造参数）。剩下的都是命令行工具自己的，
-在 `tools/cli_config.h` 里，用 `#ifndef` 包住所以命令行 `-D` 优先：
+**The library itself has no compile-time options** (the linkage is a constructor argument).
+What remains belongs to the command-line tool, in `tools/cli_config.h`, wrapped in `#ifndef`
+so `-D` on the command line wins:
 
 ```bash
-make MIN_SIM=60 DEBUG=2          # 默认切树阈值、调试级别
+make MIN_SIM=60 DEBUG=2          # the default cut threshold and the debug level
 ```
 
-- `MIN_SIM_CLUST`：`--cut` 的默认值（默认 50）
-- `MAX_SIM_READ`：输入相似度上界（默认 65535）。**这是历史遗留**（原来是
-  `unsigned short`），库本身接受任意有限非负 `double`
-- `DEBUG`：0=静默 1=阶段与进度 2=每次合并的细节
-- `DEBUG_FREQ_READDB`：读入进度的打印频度
+- `MIN_SIM_CLUST`: the default of `--cut` (50)
+- `MAX_SIM_READ`: the input bound on similarity (65535). **This is historical** (it used to be
+  an `unsigned short`); the library accepts any finite non-negative `double`
+- `DEBUG`: 0 = silent, 1 = phases and progress, 2 = per-merge detail
+- `DEBUG_FREQ_READDB`: how often read progress is printed
 
-链接方式、切法、`--floor` 都是运行时参数，见 `spclust_cli --help`。
+The linkage, the cut mode and `--floor` are all run-time arguments; see `spclust_cli --help`.

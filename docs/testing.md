@@ -1,185 +1,217 @@
-# 测试
+# Testing
 
-四层，各自盯着不同的东西：
+Six layers, each watching something different:
 
-| 层 | 位置 | 盯什么 | 规模 |
+| Layer | Where | Watches | Size |
 |---|---|---|---|
-| 切树属性测试 | `tests/test_cut.cpp` | 库的三个切树接口 + 多实例 | `PASS=18281` |
-| 差分测试 | `tests/run_tests.py` + `tests/oracle.py` | 合并序列对不对（算法） | `PASS=90 WARN=12 FAIL=0` |
-| CLI 契约测试 | `tests/test_cli.py` | 退出码、选项、输出不变量 | `11/11` |
-| scipy 互操作 | `tests/test_scipy.py` | 格式与语义真的对得上（用真 scipy 当尺子） | 46 组 |
-| C API | `tests/test_c_api.c` + `tests/test_c_api.py` | C 头文件是纯 C、ABI 与错误码契约、FFI 能 dlopen | 64 + 31 项 |
-| 性能回归护栏 | `tests/bench.py` | 变慢没有（防退化） | 5 个用例 |
+| cut property test | `tests/test_cut.cpp` | the library's three cut entry points + multiple instances | `PASS=18281` |
+| differential test | `tests/run_tests.py` + `tests/oracle.py` | whether the merge sequence is right (the algorithm) | `PASS=90 WARN=12 FAIL=0` |
+| CLI contract test | `tests/test_cli.py` | exit codes, options, output invariants | `11/11` |
+| scipy interop | `tests/test_scipy.py` | format and semantics really line up (real scipy as the ruler) | 46 combinations |
+| C API | `tests/test_c_api.c` + `tests/test_c_api.py` | the header is plain C, the ABI and error contract, FFI can dlopen it | 64 + 31 checks |
+| performance guard | `tests/bench.py` | that it has not got slower (anti-regression) | 5 cases |
 
-前三个都在 `make test` / `ctest` 里，第四个是 `make bench`。
+The first five are inside `make test` / `ctest`; the sixth is `make bench`.
 
-## 切树属性测试（库级）
+## Cut property test (library level)
 
-`tests/test_cut.cpp` 只看库，不看 CLI。关键是**期望值不能把库里的并查集再写一遍**——
-那样两边同错也测不出来。这里用的是另一条路径：合并树里每个节点天然对应一个叶子集合，
-于是"切在前 i 次合并"就是"该前缀里没有父节点的那些节点的叶子集合"。三种切法都能
-这样直接算出来，再和库里三个接口的返回逐一对比。
+`tests/test_cut.cpp` looks only at the library, never at the CLI. The point is that the
+**expectations must not be a second copy of the union-find inside the library** - if both sides
+made the same mistake, the test would see nothing. A different route is used instead: every node
+of a merge tree is naturally a leaf set, so "cut after the first i merges" is "the leaf sets of the
+nodes with no parent in that prefix". All three cut modes can be computed that way directly and
+then compared, one by one, with what the library returns.
 
-覆盖：三种链接 × 21 个随机图（2~40 个对象，含稠密/稀疏/带重复边），加上
-并列阈值、`k>n`、`cut(0)`、单调性（`k-1` 的每个簇必是 `k` 里若干簇的整并）、
-每个簇的紧致度必须等于"造出它的那次合并"记下的值。最后还有**多实例**那一段：
-两组数据三个对象交错喂边、交错 `build()`，结果必须与单独跑逐字节一致 ——
-这是把 34 个文件静态变量搬进对象之后最该测的一条性质。
+Coverage: three linkages x 21 random graphs (2-40 objects, dense/sparse/with duplicate edges),
+plus tied thresholds, `k > n`, `cut(0)`, monotonicity (every cluster of `k-1` must be an exact
+union of clusters from `k`), and the rule that a cluster's cohesion equals the value recorded by
+the merge that created it. Finally there is the **multiple instances** section: two datasets
+across three objects, interleaved edges and interleaved `build()` calls, must reproduce the solo
+runs byte for byte - the property that mattered most after moving 34 file statics into an object.
 
-顺带一个结构性证据：`nm libspclust.a` 的 `.data`/`.bss` 里没有算法状态
-（只有字符串与跳转表这类常量），所以多个 `HAC` 对象之间不存在隐藏共享。
+One structural piece of evidence comes along for free: `.data`/`.bss` of `libspclust.a`
+(according to `nm`) contains no algorithm state, only constants such as string literals and jump
+tables, so `HAC` objects cannot secretly share anything.
 
-## C API（真 C 编译器 + 真 FFI）
+## C API (real C compiler + real FFI)
 
-`tests/test_c_api.c` 是**真 C**（用 `$(CC)` 编），所以它顺手验证了头文件确实是纯 C、
-`extern "C"` 的符号在 C 侧可用。`tests/test_c_api.py` 再用 ctypes 从 Python 调同一个库
-编出来的共享库，验证动态加载、符号名、结构体布局，以及最重要的一条：**C++ 异常不穿过
-C 边界** —— 从 Python 传一个自环，必须拿到 `SPCLUST_ERR_INVALID_ARGUMENT` 而不是
-让进程 abort。
+`tests/test_c_api.c` is **real C** (compiled by `$(CC)`), so it incidentally proves the header
+really is plain C and that the `extern "C"` symbols work from C. `tests/test_c_api.py` then calls
+a shared build of the same library from Python via ctypes, verifying dynamic loading, symbol
+names, struct layout and - most importantly - that **C++ exceptions do not cross the C boundary**:
+a self-loop passed from Python must yield `SPCLUST_ERR_INVALID_ARGUMENT` rather than aborting the
+process.
 
-## scipy 互操作（换一把外来尺子）
+## scipy interop (a foreign ruler)
 
-前面几层用的都是我们自己写的 oracle。`tests/test_scipy.py` 换成 scipy —— 一个来源完全不同、
-被广泛使用的实现，检查两件事：**格式合规**（`is_valid_linkage` / `is_monotonic` / `to_tree` /
-`fcluster` 都能直接用）和**语义对得上**（在"没有并列且树完整"的用例上，逐行与
-`scipy.cluster.hierarchy.linkage` 完全相同，含高度与 size）。
+The layers above all use an oracle we wrote ourselves. `tests/test_scipy.py` swaps in scipy - a
+completely differently sourced, widely used implementation - and checks two things: **format
+validity** (`is_valid_linkage` / `is_monotonic` / `to_tree` / `fcluster` all usable directly) and
+**semantic agreement** (on cases with no ties and a complete tree, row for row identical to
+`scipy.cluster.hierarchy.linkage`, heights and sizes included).
 
-关键前提是距离映射选对：本库的"缺失边 = 相似度 0"对应"距离 = C - 相似度"（C = 最大相似度），
-于是 `average` 链接与 scipy 的 `method='average'` 在同一个稠密距离矩阵上等价。
+The key prerequisite is choosing the distance mapping correctly: this library's "an absent edge
+is similarity 0" corresponds to "distance = C - similarity" (C = the largest similarity), which
+makes `average` linkage equivalent to scipy's `method='average'` on the same dense distance
+matrix.
 
-这里也测两条**已知差异**，免得它们某天悄悄变成 bug：
-`MinNonzero` 在稠密输入上必须等于 scipy 的 `complete`（6/6），在稀疏输入上应当不同；
-森林（残缺树）必须在 stderr 上警告，且 `--scipy-bridge` 之后行数恰好 n-1、最后一行 size 恰好 n。
+Two **known differences** are tested here as well, so they cannot quietly turn into bugs:
+`MinNonzero` must equal scipy's `complete` on dense input (6/6) and must differ on sparse input;
+and a forest (an incomplete tree) must warn on stderr, with `--scipy-bridge` producing exactly
+n-1 rows and a last size of exactly n.
 
-没装 numpy/scipy 时整个测试跳过并返回 0，所以不装也能跑 `make test`。
+Without numpy/scipy the whole test skips and returns 0, so `make test` works without them.
 
-## 差分测试
+## Differential test
 
-库核心 `src/hac.cpp` 是手写 `malloc/free` + 四向指针 + 十字链表的代码，这类代码的正确性
-没法靠读代码确认。所以 `make test` 做**三方交叉验证**：
+The core (`src/hac.cpp`) is hand-written `malloc`/`free` with four-way pointers and a cross-linked
+list, and correctness of that kind of code cannot be established by reading it. So `make test`
+performs a **three-way cross-check**:
 
 ```
-1. oracle(brute)  tests/oracle.py  每步从原始稠密矩阵按定义重算。最可信，O(n^4)。
-2. oracle(fast)   tests/oracle.py  用恒等式增量维护聚合量。O(n^3)。
-3. spclust                          被测对象。
+1. oracle(brute)  tests/oracle.py  recomputes from the raw dense matrix by definition at every
+                                   step. Most trustworthy, O(n^4).
+2. oracle(fast)   tests/oracle.py  maintains the aggregates incrementally. O(n^3).
+3. spclust                         the subject under test.
 ```
 
-`oracle.py` 里**没有** Lance-Williams 递推、没有链表，只有“按定义算 + 取全局 argmax”，
-所以它是独立的。三种实现都用精确整数运算（`Fraction`），不引入浮点误差。
+`oracle.py` contains **no** Lance-Williams recurrence and no linked lists - only "compute by
+definition and take the global argmax" - which makes it independent. All three implementations
+use exact integer arithmetic (`Fraction`), so no floating-point error is introduced.
 
-判定规则：spclust 与 oracle 的**逐次合并**（成员集合 + 相似度）以及最终分组必须一致。
-不一致时分四类：
+The rule: spclust and the oracle must agree on the **merge sequence** (member sets plus
+similarity) and on the final partition. Disagreements fall into six classes:
 
-| 标记 | 含义 |
+| Mark | Meaning |
 |---|---|
-| `PASS` | 与精确定义完全一致 |
-| `WARN` | 并列最大（或截断造成的并列）导致合并顺序不确定，两边都可能合法 |
-| `TRUNC` | 偏差完全由 `unsigned short` 整数截断解释（见“已知问题 1”）|
-| `KNOWN` | 记录在 `tests/known_divergences.txt` 里、已确认可由实现语义解释的分歧 |
-| `DRIFT` / `FAIL` / `ORACLE` | 未解释的偏差 / 结果不同 / 测试工具自身不一致 —— 这三种都会让 `make test` 失败 |
+| `PASS` | exactly consistent with the definition |
+| `WARN` | a tie for the maximum (or a tie created by truncation) makes the merge order unspecified; both sides may be legal |
+| `TRUNC` | the deviation is fully explained by `unsigned short` integer truncation (see known issue 1) |
+| `KNOWN` | a divergence listed in `tests/known_divergences.txt` and accepted as explicable |
+| `DRIFT` / `FAIL` / `ORACLE` | unexplained deviation / different results / the harness itself is inconsistent - all three fail `make test` |
 
-oracle 自身的可信度靠 brute 与 fast 互相校验（小规模时两者必须逐次一致，报告里会打印次数）。
+The oracle's own credibility rests on brute and fast cross-checking each other (on small inputs
+they must agree merge by merge; the number of such checks is printed in the report).
 
-用例 = `tests/cases/*.csv`（22 个手写边界用例，每个文件的注释写明它在探测什么）
-+ 12 个随机稀疏图用例（相似度互不相同，避免并列）。全套在 1 秒左右跑完。
+Cases are `tests/cases/*.csv` (22 hand-written boundary cases, each with a comment saying what it
+probes) plus 12 random sparse graphs (with distinct similarities, to avoid ties). The whole set
+runs in about a second.
 
 ```bash
-make test                      # 默认 min_sim=50
-make test MIN_SIM=70           # 换阈值重跑（oracle 会同步，被测二进制也会重编）
+make test                      # default min_sim=50
+make test MIN_SIM=70           # rerun at another threshold (the oracle follows, and the binary is rebuilt)
 python3 tests/run_tests.py --only average --verbose
-python3 tests/run_tests.py --quick --case 15_   # 只跑指定用例
-python3 tests/oracle.py sim.csv --linkage average --cut 50    # 单独用 oracle 看结果（--cut 切树）
+python3 tests/run_tests.py --quick --case 15_   # only matching cases
+python3 tests/oracle.py sim.csv --linkage average --cut 50    # run the oracle alone (--cut cuts the tree)
 ```
 
-当前结果（`cut=50`，22 个手写 + 12 个随机 × 3 种 linkage = 102 次比对）：
+Current results (`cut=50`, 22 hand-written + 12 random x 3 linkages = 102 comparisons):
 
 ```
 PASS=90  WARN=12  KNOWN=0  TRUNC=0  DRIFT=0  XPASS=0  FAIL=0  ORACLE=0
-oracle 自检（brute/fast 一致 + 切树=提前停止）: 198 次
-多阈值切树一致性检查: 900 次
+oracle self-checks (brute/fast agree + cut == early stop): 198
+multi-threshold cut consistency checks: 900
 RESULT: PASS
 ```
 
-比对的是**完整合并树**（runner 给 spclust 传 `--floor 0`，给 oracle 传 `min_sim=0`），
-比只比"切树阈值以上那段"强得多；在此之上再对 10 个阈值分别切一刀做交叉验证
-（900 = 90 个 PASS 结果 × 10 个阈值）。**KNOWN 已清空** —— 唯一一处登记过的分歧
-（重复 pair 语义）在语义定清并两边对齐之后消失了。WARN 从 8 涨到 12 是因为树延伸到低相似度区域后
-并列（tie）变多，属正常。
+What is compared is the **full merge tree** (the runner passes `--floor 0` to spclust and
+`min_sim=0` to the oracle), which is much stronger than comparing only the part above the cut
+threshold. On top of that, ten thresholds are cut separately for cross-validation (900 = 90 PASS
+results x 10 thresholds). **KNOWN is now empty** - the one divergence that was ever registered
+(duplicate-pair semantics) disappeared once the semantics were settled and both sides were
+aligned. WARN rose from 8 to 12 because a tree reaching down to low similarities has more ties,
+which is normal.
 
-结论：**`src/hac.cpp` 的链表维护本身是可靠的** —— 在 44 个对象、43 次连续合并、
-七种输入形态（含稠密完全图、星型、长链、多连通分量、零相似度边、逆序输入、小数相似度）上，
-`max`/`min` 两种链接的 64 次比对里只有 WARN（并列）和已登记的重复-pair 分歧。
+The conclusion: **the linked-list maintenance in `src/hac.cpp` is reliable** - across 44 objects,
+43 consecutive merges and seven input shapes (dense complete graph, star, long chain, several
+connected components, zero-similarity edges, reversed input, fractional similarities) the 64
+comparisons under max/min linkage show only WARNs (ties) and the registered duplicate-pair
+divergence.
 
-另外 `average` 的相似度经修复后与精确定义的残差是纯浮点量级：
+After the fix, average linkage's residual against the exact definition is purely floating-point:
 
 ```
-排除两个重复-pair 语义用例，146 次逐次相似度比对：
-  最大绝对误差 = 3.3e-11
-  最大相对误差 = 4.3e-13   （DEBUG 日志保留 12 位有效数字，这基本就是打印精度）
+excluding the two duplicate-pair semantic cases, 146 per-merge similarity comparisons:
+  largest absolute error = 3.3e-11
+  largest relative error = 4.3e-13   (the DEBUG log keeps 12 significant digits, so this is
+                                      essentially the print precision)
 ```
 
-`TRUNC` 现在是**回归护栏**：如果谁把相似度改回 `unsigned short`，那 12 个 `TRUNC` 会
-全部重新出现，而 `TRUNC` 算**失败**。
+`TRUNC` now serves as a **regression guard**: if anyone put similarities back to `unsigned
+short`, those 12 `TRUNC` results would reappear, and `TRUNC` counts as **failure**.
 
-### CLI 接口测试（`tests/test_cli.py`）
+### CLI interface test (`tests/test_cli.py`)
 
-上面的差分测试验证的是**算法**（解析 DEBUG 日志与 oracle 比对），而命令行接口
-—— `--cut/--floor/--tree/--matrix`、退出码、stdin 模式 —— 之前完全没有覆盖。
-两者还容易互相掩盖：程序与 runner 之间靠"合并日志的格式"隐性耦合，改一行输出就可能让
-runner 静默地少算（本项目就发生过：Kruskal 路径忘了打印那行日志，runner 报成"0 次合并"）。
+The differential test above verifies the **algorithm** (parsing the merge log and comparing with
+the oracle), while the command-line interface - `--cut/--floor/--tree/--matrix`, exit codes, the
+stdin mode - had no coverage at all. The two also tend to mask each other: the program and the
+runner were implicitly coupled through the merge log's format, so one changed output line could
+make the runner silently under-count (it happened here: the Kruskal path forgot to print that line
+and the runner reported "0 merges").
 
-`make test` 里的第二段只测接口契约，不重复测算法：
+The second part of `make test` tests only the interface contract, not the algorithm again:
 
-| 检查 | 内容 |
+| Check | Contents |
 |---|---|
-| 退出码与错误路径 | `--help`→0；未知选项/多余参数/`--cut` 缺值→2；文件不存在/空输入→1 |
-| `--cut` 与 oracle 一致 | 22 个用例 × 5 个阈值，CLI 的分组必须等于 oracle 把完整树切在同一处 |
-| 切树 == 提前停止 | `--floor 0 --cut X` 必须等于 `--floor X --cut X`（单调性在 CLI 层的体现）|
-| `--floor`/`--cut` 交互 | 只给 `--cut 10` 时 floor 要自动降到 10，否则切不到 |
-| `--matrix` 结构不变量 | 每行的子节点 id 必须更小且只被用作一次子节点；size≥2；相似度单调不增；根的 size 之和 = 对象数 |
-| `--tree` 完整性 | 每个对象恰好出现一次；根数与 `--matrix` 一致 |
-| stdin 与文件等价 | 文件 / `-` / 无参数 三种读法结果必须相同 |
-| 重复 pair 顺序无关 | 交换两行顺序结果不变（取最大值语义）|
+| exit codes and error paths | `--help` -> 0; unknown option / extra argument / `--cut` without a value -> 2; missing file / empty input -> 1 |
+| `--cut` matches the oracle | 22 cases x 5 thresholds; the CLI partition must equal the oracle's full tree cut at the same place |
+| cut == early stop | `--floor 0 --cut X` must equal `--floor X --cut X` (monotonicity at the CLI level) |
+| `--floor` / `--cut` interaction | with only `--cut 10` given, the floor must drop to 10 automatically, or the cut is unreachable |
+| `--matrix` structural invariants | each row's child ids must be smaller and used as a child only once; size >= 2; similarity non-increasing; root sizes summing to the object count |
+| `--tree` completeness | every object appears exactly once; the root count matches `--matrix` |
+| stdin equals file | file / `-` / no argument must all give the same result |
+| duplicate pairs are order-independent | swapping two input lines changes nothing (maximum-wins semantics) |
 
-写这个测试时它**立刻抓到一个真的接口问题**：`--nope` 被当成文件名，于是报"文件打不开"
-（退出码 1），把"用法错误"和"输入错误"混在一起了。现在未知选项返回 2。
+Writing this test **immediately found a real interface problem**: `--nope` was treated as a
+filename, so it was reported as "cannot open file" (exit code 1), conflating a usage error with an
+input error. Unknown options now return 2.
 
-### 性能回归护栏（`tests/bench.py`，`make bench`）
+### Performance guard (`tests/bench.py`, `make bench`)
 
-本项目累计拿到约 39x 时间 / −55% 内存，但**没有任何东西防止它退化**；而机器噪声又足以
-骗过单次测量（开发过程中被噪声骗过两次、被采样归因骗过一次）。所以把协议和基线固化：
+This project has gained about 39x in time and -55% in memory in total, but **nothing was
+preventing it from regressing**, and machine noise is enough to fool a single measurement (noise
+fooled it twice during development and sampling attribution once). So the protocol and the baseline
+are pinned:
 
-- **固定输入**：`tests/gen_bench.py` 的参数写死。这一点是必要的 —— 运行时强烈依赖相似度
-  分布（同样的 n 与边数，值域 0..100 与 1..65535 实测差 3 倍以上），换种子或值域前后就不可比。
-- **哨兵只抓得住"明显"的状态变化。** 实测过一次：基线在机器忙/热时记的，之后空闲时跑，
-  所有用例都显示"快 2 倍"（哨兵 0.57x，被正确拦下）。但另一次机器状态的漂移只有 ~20%，
-  哨兵（0.89x）没拦住，于是长用例显示"快 18~34%"—— 而用交替 A/B 对比重构前后的二进制，
-  真实差异是 1.00~1.01x。**所以 `make bench` 是烟雾报警器，不是精密仪器**：
-  别把 1.2x 当回归，机器状态一变就用 `make bench-update` 重记基线；要精确比较两个版本，
-  必须像上面那样交替执行。
-- **协议**：每个用例重复 N 次取中位数；**最小/下四分位/中位数差异 >15% 就标"噪声大"**，
-  这时不给结论。容差 25%（时间）/ 15%（内存）；只有超过 **3x 时间 / 2x 内存**才失败
-  （`--strict` 可按容差硬失败）。
-- **基线**：`tests/bench_baseline.txt`，用 `make bench-update` 重记（换机器或有意的性能改动之后）。
+- **Fixed inputs**: the parameters in `tests/gen_bench.py` are frozen. This is necessary - runtime
+  depends strongly on the similarity distribution (with the same n and edge count, a range of
+  0..100 and 1..65535 measured over 3x apart), so changing the seed or the range makes before and
+  after incomparable.
+- **The canary only catches "obvious" state changes.** It was tested: a baseline recorded on a
+  busy/hot machine, rerun idle, showed everything "2x faster" (the canary read 0.57x and correctly
+  refused to conclude). But another drift was only about 20%, which the canary (0.89x) let
+  through, so the long cases showed "18-34% faster" - while an alternating A/B against the
+  pre-refactor binary showed the real difference was 1.00-1.01x. **So `make bench` is a smoke
+  alarm, not a measuring instrument**: do not treat 1.2x as a regression, re-record the baseline
+  with `make bench-update` whenever the machine state changes, and to compare two versions
+  precisely, alternate them as described above.
+- **Protocol**: each case is repeated N times and the median taken; **if min / lower quartile /
+  median differ by more than 15% it is marked noisy** and no conclusion is drawn. Tolerance is
+  25% (time) / 15% (memory); only exceeding **3x time / 2x memory** fails (`--strict` fails on
+  tolerance instead).
+- **Baseline**: `tests/bench_baseline.txt`, re-recorded with `make bench-update` (after a machine
+  change or an intentional performance change).
 
-**机器状态哨兵。** 开发中踩过一次：基线是在机器忙/热的时候记的（那一轮刚跑完 scipy 5 GB
-的对比），之后空闲时重跑，所有用例都显示"快 2 倍"，看上去像大幅优化，其实是环境变了。
-所以现在用最快的用例 `bench_small` 当探针：它与基线偏差超过 ±30% 时，**本次与基线的比较
-一律不作结论**，提示重跑或重记基线。
+**The machine-state canary.** During development a baseline was recorded while the machine was
+busy/hot (that round had just run a 5 GB scipy comparison); rerunning it idle showed everything
+"2x faster", which looked like a huge optimisation but was the environment changing. The fastest
+case, `bench_small`, is now used as a probe: if it deviates from the baseline by more than +-30%,
+**no comparison with the baseline is concluded at all**, and the user is told to rerun or re-record.
 
-基线在**机器空闲时记录**（`tests/bench_baseline.txt` 里会记下生成它的机器，换机器后
-`make bench` 会提示数字不可直接比）。当前基线：
+The baseline is recorded **with the machine idle** (the file records which machine produced it, and
+`make bench` warns when the numbers are not directly comparable). The current baseline:
 
-| 用例 | 配置 | 中位墙钟 | 峰值 RSS |
+| Case | Configuration | Median wall clock | Peak RSS |
 |---|---|---|---|
-| bench_small | n=2000，20k 边 | 0.009 s | 4.7 MB |
-| bench_mid | n=20000，200k 边，sim 1..65535 | 0.106 s | 20.7 MB |
-| bench_large | n=50000，500k 边，sim 1..65535 | 0.402 s | 47.7 MB |
-| bench_lowval | n=20000，200k 边，sim 0..100 | 0.049 s | 20.5 MB |
-| bench_single | n=50000，500k 边（单链接 / Kruskal 路径）| 0.129 s | 30.2 MB |
+| bench_small | n=2000, 20k edges | 0.009 s | 4.7 MB |
+| bench_mid | n=20000, 200k edges, sim 1..65535 | 0.106 s | 20.7 MB |
+| bench_large | n=50000, 500k edges, sim 1..65535 | 0.402 s | 47.7 MB |
+| bench_lowval | n=20000, 200k edges, sim 0..100 | 0.049 s | 20.5 MB |
+| bench_single | n=50000, 500k edges (single linkage / Kruskal) | 0.129 s | 30.2 MB |
 
-连续两次正常跑与基线相差 0.95~1.03x，哨兵 0.98~1.00x。
+Two consecutive normal runs sit within 0.95-1.03x of the baseline, with the canary at
+0.98-1.00x.
 
-护栏本身也验证过：把编译选项换成 `-O0` 重编（合成回归），三个用例被报成 `回归!`
-（5.1~6.1x）并以退出码 1 失败；而机器空闲时连续两次正常跑，比值都在 0.90~1.09x 内、内存
-0.98~1.03x。
+The guard itself was verified too: rebuilding at `-O0` (a synthetic regression) had three cases
+reported as `REGRESSION` (5.1-6.1x) and exiting with code 1, while consecutive idle runs stayed
+within 0.90-1.09x in time and 0.98-1.03x in memory.
