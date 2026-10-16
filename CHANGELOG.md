@@ -61,6 +61,14 @@ the git history, where each commit is independently revertible.
   did not trigger a rebuild - which is how a stale library reported a stale version. It now globs
   all of them, and CMake lists the headers as target sources for the same reason.
 
+- `tools/readdb.cpp` calls `strcmp()` without including `<cstring>`. libc++ pulls it in
+  transitively and libstdc++ does not, so the project did not build on Linux at all -
+  "'strcmp' was not declared in this scope". Found by CI, which is the only place that
+  could see it. Also added the missing include to the CI's own dependency setup: the macOS
+  runner's system Python is externally managed (PEP 668), so numpy and scipy now go into a
+  virtualenv, which CMake is pointed at so the interop and binding tests actually run
+  instead of skipping silently.
+
 ### Notes
 
 - Re-verified after this change: differential `PASS=102 WARN=0` (was `PASS=90 WARN=12`), cut
