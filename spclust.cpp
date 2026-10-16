@@ -372,20 +372,19 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 	//遍历每一行链表，更新最大相似度的指向
 	for (size_t i = 0; i < dim1_size; i++) {
 		if (update_max[i]) {
-			sp_unit* unit = vec_dim1[i].head;
-			double max = 0;
+			sp_unit* u = vec_dim1[i].head;
+			sp_unit* best = NULL;
 			//从左到右遍历，找到最大值
-			if (NULL == unit)
-				vec_dim1[i].max = NULL;
-			else {
-				while (NULL != unit) {
-					if (unit->sim > max) {
-						max = unit->sim;
-						vec_dim1[i].max = unit;
-					}
-					unit = unit->right;
-				}
+			while (NULL != u) {
+				if (NULL == best || u->sim > best->sim)
+					best = u;
+				u = u->right;
 			}
+			//必须无条件赋值。旧写法是 `if (u->sim > max)`，max 初值 0，
+			//一旦整行相似度都是 0 就永远不会赋值，vec_dim1[i].max 会保留一个已经被 free 的指针，
+			//下一次 get_max() 就是 heap-use-after-free（见 tests/cases/22_zero_row_max.csv）。
+			//best 仍是“从左到右第一个取得最大值的单元”，并列行为与旧写法一致。
+			vec_dim1[i].max = best;
 		}
 	}
 	return grp.size();

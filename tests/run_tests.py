@@ -77,7 +77,10 @@ def gen_random_case(rng, n, density, tag):
         return None
     k = len(pairs)
     if k <= 299:
-        vals = rng.sample(range(1, 300), k)
+        # 从 0 开始取：让 sim=0 的边（="隐式零" 路径）也有机会被随机用例覆盖。
+        # 这个区间的改动是有理由的 —— tests/cases/22_zero_row_max.csv 那个 UAF 就是
+        # 老的 1..299 区间永远生成不出来的配置
+        vals = rng.sample(range(0, 300), k)
     else:
         vals = rng.sample(range(1, 65535), k)
     lines = [
