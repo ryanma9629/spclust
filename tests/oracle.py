@@ -203,7 +203,9 @@ def hac(order, edges, linkage="average", min_sim=50, mode="brute"):
             break
 
         best_val, i, j = max(cand)
-        if best_val < min_sim:
+        #相似度 <= 0 就不再合并 —— 与 spclust 的 get_max()（相似度为 0 不算候选）对齐。
+        #于是 min_sim=0 得到的就是**完整合并树**；min_sim>0 只是提前停（等价于事后切树）。
+        if best_val < min_sim or best_val <= 0:
             break
 
         best_floor = best_val.numerator // best_val.denominator
@@ -270,6 +272,24 @@ def hac(order, edges, linkage="average", min_sim=50, mode="brute"):
         ),
         "partition": partition,
     }
+
+
+def cut(result, min_sim):
+    """把完整合并树切在 min_sim 处，返回扁平分组（对象下标的 frozenset 的 frozenset）。
+
+    相似度沿合并序列单调不增，所以"切"就是取 sim >= min_sim 的那段前缀；
+    每取一次合并就把两个子簇并起来。这与 spclust 的做法一致（它用并查集，
+    这里直接合并成员集合，更直白）。
+    传进来 result 必须是 min_sim=0 算出的**完整树**。
+    """
+    live = set(frozenset([i]) for i in range(result["objects"]))
+    for (A, B), v in result["merges"]:
+        if v < min_sim:
+            break                      # 前缀结束（序列单调不增）
+        live.discard(A)
+        live.discard(B)
+        live.add(A | B)
+    return frozenset(live)
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +377,8 @@ def main(argv):
     ap.add_argument("--linkage", default="average", choices=LINKAGES)
     ap.add_argument("--min-sim", type=int, default=50)
     ap.add_argument("--mode", default="brute", choices=("brute", "fast", "trunc"))
+    ap.add_argument("--cut", type=float, default=None,
+                    help="把结果按这个阈值切开（默认与 --min-sim 相同）")
     ap.add_argument("--json", action="store_true")
     args = ap.parse_args(argv[1:])
 
@@ -380,12 +402,15 @@ def main(argv):
             ensure_ascii=False, indent=2))
         return 0
 
-    print(f"oracle({args.linkage}/{args.mode}, min_sim={args.min_sim}): "
-          f"{r['objects']} objects, {len(r['groups'])} groups")
-    for g in r["groups"]:
+    cut_at = args.min_sim if args.cut is None else args.cut
+    part = cut(r, cut_at)
+    groups = sorted((sorted(order[i] for i in m) for m in part), key=lambda g: (-len(g), g))
+    print(f"oracle({args.linkage}/{args.mode}, 完整树 {r['merge_count']} 次合并, "
+          f"切在 {cut_at}): {r['objects']} objects, {len(groups)} groups")
+    for g in groups:
         if len(g) >= 2:
             print(f"  size={len(g):<4} {g}")
-    singles = sorted(x for g in r["groups"] if len(g) == 1 for x in g)
+    singles = sorted(x for g in groups if len(g) == 1 for x in g)
     if singles:
         print(f"  Unclustered ({len(singles)}): {singles}")
     return 0

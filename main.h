@@ -104,6 +104,19 @@ struct p_dim1 {
 struct p_dim2 {
 	uint32_t head;
 };
+//一次合并的记录 —— 也就是标准 linkage 矩阵的一行。
+//
+//节点编号沿用 scipy 的约定：0..n-1 是原始对象，n+i 是第 i 次合并产生的簇。
+//这里**组号天然就是节点 id**：初始 n 个组的 id 是 0..n-1，之后每次合并取
+//new_grp = grp.size()，所以第 i 次合并产生的组号恰好是 n+i。
+struct merge_rec {
+	uint32_t left;      // 左子节点
+	uint32_t right;     // 右子节点
+	double sim;         // 合并时的相似度（该簇的"高度"，越大越先合并）
+	double cohesion;    // 合并后整个簇的组内平均相似度（沿用原来输出里 sim= 的含义）
+	size_t size;        // 合并后的簇大小
+};
+
 //聚类结果的元素，组内相似性+成员列表
 struct grp_s {
 	double sim;

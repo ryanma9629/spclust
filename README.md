@@ -74,18 +74,63 @@ make help
 
 ## 输出
 
+默认打印"把合并树在 `MIN_SIM_CLUST`（默认 50）处切开"的扁平分组：
+
 ```
-Linkage=0=average, min_sim=50
+Linkage=0=average, cut=50
 Objects: 16, groups: 3
-Group 0 (size=5, sim=90.5): a4 a5 a3 a1 a2
-Group 1 (size=4, sim=87.6667): b4 b3 b1 b2
-Group 2 (size=3, sim=82): c3 c1 c2
+Group 0 (size=5, sim=90.5): a1 a2 a3 a4 a5
+Group 1 (size=4, sim=87.6667): b1 b2 b3 b4
+Group 2 (size=3, sim=82): c1 c2 c3
 Unclustered (4): d1 d2 e1 e2
 ```
 
 `sim` 是**组内平均相似度**（average linkage 下按组大小加权累加得到），可以当作簇的紧致度。
-只列出 size>=2 的簇，剩下的单元素对象列在 `Unclustered` 里。
-注：修复前这里是截断后的整数（`sim=90` / `sim=87`），现在才是真实的平均值。
+只列出 size>=2 的簇，剩下的单元素对象列在 `Unclustered` 里；
+簇内成员按对象 **id 顺序（输入中首次出现的顺序）** 列出。
+
+### 合并树是完整算出来的，阈值只是"切在哪里"
+
+聚类过程会记下**每一次合并**（`merges`，就是标准 linkage 矩阵），所以：
+
+```bash
+./spclust sim.csv --cut 86      # 切在 86（不重新聚类）
+./spclust sim.csv --cut 20      # 切在 20
+./spclust sim.csv --tree        # 人类可读的树状图
+./spclust sim.csv --matrix      # linkage 矩阵：left right height size
+```
+
+节点 id 沿用 scipy 的约定：`0..n-1` 是原始对象（按输入首次出现顺序），`n+i` 是第 i 次合并。
+**这里组号天然就是节点 id** —— 初始 n 个组的 id 是 `0..n-1`，之后每次合并取
+`new_grp = grp.size()`，所以第 i 次合并产生的组号恰好是 `n+i`。
+注意 `height` 是**相似度**（越大越先合并），scipy 用的是距离。
+
+切树的依据是"相似度沿合并序列单调不增"（average / max / min 三种链接都是可归约的），
+所以切 = 取 `sim >= cut` 的那段前缀再用并查集并起来。**这条性质测试里是当作自检项验证的**
+（"把完整树切在 X 处"必须等于"直接用 X 当停止条件跑一遍"），198 次全过。
+
+### 两个参数：`--floor` 与 `--cut`
+
+算出多深的树是需要付代价的，所以分开：
+
+| 参数 | 含义 | 默认 |
+|---|---|---|
+| `--cut <X>` | 把树切在相似度 X 处 | `MIN_SIM_CLUST`（50）|
+| `--floor <X>` | 树算到多低（合并到最大相似度 < X 就停） | 等于 `--cut` |
+
+**默认什么都不给时，成本与"直接在阈值处停下"完全一样**（floor = cut = 50）。
+想要更深的树才付代价：
+
+| n | 边数 | 默认（cut=50）| `--cut 20` | `--floor 0`（完整树）| 全树成本 |
+|---|---|---|---|---|---|
+| 20,000 | 200k | 0.051 s | 0.062 s | 0.111 s | 2.17x |
+| 40,000 | 400k | 0.115 s | 0.139 s | 0.287 s | 2.50x |
+| 80,000 | 800k | 0.321 s | 0.463 s | 0.953 s | 2.97x |
+| 200,000 | 2M | 1.115 s | – | 4.222 s | 3.79x |
+
+规则是：没给 `--floor` 而 `--cut` 比默认更低时，floor 自动跟着降 ——
+所以"只想在更低的阈值切一刀"不需要额外参数。切在 `--floor` 之下是做不到的（需要重算），
+但按上面的规则它不会发生。
 
 ## 测试（差分验证）
 
@@ -122,16 +167,22 @@ make test                      # 默认 min_sim=50
 make test MIN_SIM=70           # 换阈值重跑（oracle 会同步，被测二进制也会重编）
 python3 tests/run_tests.py --only average --verbose
 python3 tests/run_tests.py --quick --case 15_   # 只跑指定用例
-python3 tests/oracle.py sim.csv --linkage average --min-sim 50   # 单独用 oracle 看结果
+python3 tests/oracle.py sim.csv --linkage average --cut 50    # 单独用 oracle 看结果（--cut 切树）
 ```
 
-当前结果（`min_sim=50`，22 个手写 + 12 个随机 × 3 种 linkage = 102 次比对）：
+当前结果（`cut=50`，22 个手写 + 12 个随机 × 3 种 linkage = 102 次比对）：
 
 ```
-PASS=88  WARN=8  KNOWN=6  TRUNC=0  DRIFT=0  FAIL=0  ORACLE=0
-oracle 自检（brute 与 fast 逐次一致）: 96 次
+PASS=84  WARN=12  KNOWN=6  TRUNC=0  DRIFT=0  FAIL=0  ORACLE=0
+oracle 自检（brute/fast 一致 + 切树=提前停止）: 198 次
+多阈值切树一致性检查: 840 次
 RESULT: PASS
 ```
+
+比对的是**完整合并树**（runner 给 spclust 传 `--floor 0`，给 oracle 传 `min_sim=0`），
+比只比"切树阈值以上那段"强得多；在此之上再对 10 个阈值分别切一刀做交叉验证
+（840 = 84 个 PASS 结果 × 10 个阈值）。WARN 从 8 涨到 12 是因为树延伸到低相似度区域后
+并列（tie）变多，属正常。
 
 结论：**`spclust.cpp` 的链表维护本身是可靠的** —— 在 44 个对象、43 次连续合并、
 七种输入形态（含稠密完全图、星型、长链、多连通分量、零相似度边、逆序输入、小数相似度）上，
@@ -153,13 +204,21 @@ RESULT: PASS
 全部在 `main.h` 里，都用 `#ifndef` 包住，所以可以在命令行覆盖、不用改源码：
 
 ```bash
-make run LINKAGE=1 MIN_SIM=60 DEBUG=2
+make run LINKAGE=1 MIN_SIM=60 DEBUG=2        # 改默认切树阈值
+make run MIN_SIM=0 LINKAGE=0                  # hmm，MIN_SIM=0 只改默认；树深度见 --floor
+```
+
+运行时参数（不改源码、不重编译）：
+
+```bash
+./spclust data.csv --cut 80 --tree            # 切在 80 并打印树
+./spclust data.csv --floor 0 --matrix         # 完整树 + linkage 矩阵
 ```
 
 | 变量 | 默认 | 含义 |
 |---|---|---|
 | `LINKAGE` | 0 | 0=average；1=max（原注释写 complete）；2=min，仅当两条边都存在时才更新（原注释写 single） |
-| `MIN_SIM_CLUST` | 50 | 相似度下限，低于此值停止合并 |
+| `MIN_SIM_CLUST` | 50 | **默认的切树阈值**（不再影响聚类本身）。可用 `--cut` 覆盖 |
 | `DEBUG` | 1 | 0=静默，1=阶段/进度，2=每次合并的细节 |
 | `DEBUG_FREQ_READDB` | 10000 | 读数据的进度打印频度 |
 | `DEBUG_FREQ_CLUST` | 100 | 聚类进度打印频度（建议 >=100） |

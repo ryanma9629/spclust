@@ -101,6 +101,12 @@ static vector<size_t> updated;            // 需要重算相似度的下标（�
 static vector<size_t> dirty_max;          // max 指针失效、需要重扫的行
 static vector<size_t> touched;            // 本次置过位的位置，用于 O(k) 复位
 
+//合并树。每次 merge_grp 成功合并一对就追加一条 —— 这就是层次聚类的完整输出，
+//MIN_SIM_CLUST 从"停止条件"变成了"切树的位置"（见 main.cpp 的 cut_tree）。
+vector<merge_rec> merges;
+static size_t n_objects = 0;
+static vector<string> object_names;   // id -> 对象名
+
 //本次合并中，下标 x 到 group1 / group2 的相似度。相似度非负（读取端限制 [0,65535]），
 //所以 -1 可以安全地表示"没有这条边"。
 //
@@ -366,6 +372,7 @@ void init_add_edge(string obj1, string obj2, double sim) {
 		grp.resize(map_obj_grp.size());
 		grp[map_obj_grp.size() - 1].sim = 0;
 		grp[map_obj_grp.size() - 1].objs.push_back(o1.first->first);
+		object_names.push_back(o1.first->first);   // id -> 名字，供树输出用
 	}
 
 	pair<obj_id_map::iterator, bool> o2 =
@@ -374,6 +381,7 @@ void init_add_edge(string obj1, string obj2, double sim) {
 		grp.resize(map_obj_grp.size());
 		grp[map_obj_grp.size() - 1].sim = 0;
 		grp[map_obj_grp.size() - 1].objs.push_back(o2.first->first);
+		object_names.push_back(o2.first->first);
 	}
 
 	//把组信息而不是对象信息加入全局结构
@@ -683,35 +691,58 @@ void free_mem(void) {
 	live_rows = 0;
 }
 
+size_t tree_object_count(void) {
+	return n_objects;
+}
+
+//节点 id -> 对象名
+const string& object_name(size_t id) {
+	return object_names[id];
+}
+
 //聚类主过程
-void clust_grp(void) {
+void clust_grp(double floor) {
 	//结构在 readdb 边读边回调时就已经建好了（见 init_add_edge），这里只剩聚类
 	clock_t s_time = clock();
 	clock_t e_time = 0;
 	if (DEBUG >= 1)
 		cout << "Clustering..." << endl;
 
-	//初始组（对象）数
+	//初始组（对象）数 = 树的叶子数
+	n_objects = grp.size();
 	size_t grp_size = grp.size();
-	//如果没有全部合并成1组，或剩余最大相似度小于阈值 MIN_SIM_CLUST
+	//合并到最大相似度 < floor 为止。floor 由调用方给：
+	//  floor = 切树阈值  -> 成本与"直接在阈值处停下"完全一样（默认就是这样）
+	//  floor <= 0        -> 完整树，代价是多做很多次合并（实测 2.2~4.2x，见 README）
+	//记录下来的 merges 就是树；MIN_SIM_CLUST 不再是停止条件，而是切树的默认位置。
 	while (grp_size > 1) {
 		uint32_t unit = get_max();
-		double max_sim = (SP_NONE != unit) ? arena[unit].sim : 0;
-		if (SP_NONE == unit || max_sim < MIN_SIM_CLUST)
-			break;
-		else {
-			size_t group1 = arena[unit].group1;
-			size_t group2 = arena[unit].group2;
-			//每次合并，实际组数减少1
-			if (DEBUG >= 1 && 0 == grp_size % DEBUG_FREQ_CLUST)
-				cout << "\t" << grp_size << " groups left with max_sim=" << max_sim << "." << endl;
-			grp_size--;
-			size_t new_grp = merge_grp(group1, group2, max_sim) - 1;
-			if (DEBUG >= 2)
-				cout << "\tGroup " << group1 << " and group " << group2 << 
-					" are merged into group " << new_grp << " (sim=" << setprecision(12)
-					<< max_sim << ")." << endl;
-		}
+		if (SP_NONE == unit)
+			break;                      // 没有正相似度的候选了，树到此到底
+		double max_sim = arena[unit].sim;
+		if (max_sim < floor)
+			break;                      // 到 floor 了；想要更深的树就把 floor 调低
+		size_t group1 = arena[unit].group1;
+		size_t group2 = arena[unit].group2;
+		//每次合并，实际组数减少1
+		if (DEBUG >= 1 && 0 == grp_size % DEBUG_FREQ_CLUST)
+			cout << "\t" << grp_size << " groups left with max_sim=" << max_sim << "." << endl;
+		grp_size--;
+		size_t new_grp = merge_grp(group1, group2, max_sim) - 1;
+
+		//记录这次合并（组号即节点 id，见 main.h 的 merge_rec）
+		merge_rec rec;
+		rec.left = (uint32_t)group1;
+		rec.right = (uint32_t)group2;
+		rec.sim = max_sim;
+		rec.cohesion = grp[new_grp].sim;
+		rec.size = grp[new_grp].objs.size();
+		merges.push_back(rec);
+
+		if (DEBUG >= 2)
+			cout << "\tGroup " << group1 << " and group " << group2 << 
+				" are merged into group " << new_grp << " (sim=" << setprecision(12)
+				<< max_sim << ")." << endl;
 	}
 	//聚类结束，释放结构占用内存
 	free_mem();

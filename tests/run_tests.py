@@ -62,6 +62,9 @@ OUTCOME_ORDER = ("PASS", "WARN", "KNOWN", "TRUNC", "DRIFT", "XPASS", "FAIL", "OR
 # 相对/绝对容差：oracle 用精确分数，spclust 用 double，链接值是浮点累加出来的。
 # 1e-9 足够宽到容忍舍入误差，又远小于任何真实偏差
 #（1 个单位在 ~100 的量级上就是 1e-2）。
+#多阈值切树检查用的阈值（覆盖整数与小数）
+CUT_LEVELS = (1, 10, 25, 50, 66.6, 75, 85, 90, 95, 99)
+
 REL_TOL = 1e-9
 ABS_TOL = 1e-9
 
@@ -123,9 +126,11 @@ def collect_cases(args):
     return cases
 
 
-def run_spclust(bin_path, case_path):
+def run_spclust(bin_path, case_path, cut):
     proc = subprocess.run(
-        [str(bin_path), str(case_path)],
+        # --floor 0：算完整树，这样能与 oracle 的完整树逐次比对（比只比阈值以上更强）。
+        # --cut：本次要验证的切树位置。
+        [str(bin_path), str(case_path), "--floor", "0", "--cut", str(cut)],
         cwd=str(REPO), capture_output=True, text=True,
     )
     if proc.returncode != 0:
@@ -148,7 +153,7 @@ def merge_multiset(res):
     return sorted(out)
 
 
-def trunc_explains(o, o_trunc, got):
+def trunc_explains(o, o_trunc, got, o_trunc_cut):
     """spclust 与精确定义的偏差是否完全由 unsigned short 截断解释。
 
     包含两件事：
@@ -176,11 +181,16 @@ def trunc_explains(o, o_trunc, got):
                 or not values_equal(om_list[k][1], gm_list[k][1]):
             return False
     return (merge_multiset(o_trunc) == merge_multiset(got)
-            and o_trunc["partition"] == got["partition"])
+            and o_trunc_cut == got["partition"])
 
 
-def compare(o, got, order):
-    """返回 (outcome, detail)。o 是 oracle 结果，got 是解析出的 spclust 结果。"""
+def compare(o, got, order, o_cut):
+    """返回 (outcome, detail)。
+
+    o 是 oracle 的**完整合并树**（min_sim=0）。
+    o_cut 是把 o 在本次阈值处切开得到的分区；spclust 打印的分区也切在同一阈值，
+    所以两者应当一致。合并序列本身则做完整比对 —— 比只比"阈值以上那段"更强。
+    """
     om, gm = o["merges"], got["merges"]
 
     # 找第一次分歧
@@ -194,8 +204,8 @@ def compare(o, got, order):
 
     if k is None:
         drift = [i for i in range(len(om)) if not values_equal(om[i][1], gm[i][1])]
-        if o["partition"] != got["partition"]:
-            return "FAIL", "merge 全一致但最终分组不同"
+        if o_cut != got["partition"]:
+            return "FAIL", "merge 全一致但在该阈值处切开的分组不同"
         if drift:
             return "DRIFT", f"{len(drift)} 步相似度不一致，第 {drift[0]} 步: " \
                            f"oracle={float(om[drift[0]][1]):.6f} spclust={float(gm[drift[0]][1]):.6f}"
@@ -213,7 +223,7 @@ def compare(o, got, order):
                       f"vs spclust {obj_names(C, order)}|{obj_names(D, order)}(sim={float(gm[k][1]):.6f})")
     else:
         detail.append(f"第 {k} 步起停止位置不同: oracle 共 {len(om)} 次合并，spclust {len(gm)} 次")
-    detail.append("oracle 分组=" + str(sorted(sorted(obj_names(g, order)) for g in o["partition"])))
+    detail.append("oracle 分组=" + str(sorted(sorted(obj_names(g, order)) for g in o_cut)))
     detail.append("spclust 分组=" + str(sorted(sorted(obj_names(g, order)) for g in got["partition"])))
     if ties:
         detail.append(f"并列/截断发生在第 {ties} 步")
@@ -258,6 +268,7 @@ def main(argv=None):
     failures = []
     notes = []
     selfcheck = 0
+    cut_checks = 0
     tmpdir = tempfile.TemporaryDirectory()
     tmp = Path(tmpdir.name)
 
@@ -273,28 +284,42 @@ def main(argv=None):
             continue
 
         for lk in linkages:
-            # oracle 自检：小规模时同时跑 brute（每步按定义重算）和 fast（增量维护），
+            # oracle 自检 1：小规模时同时跑 brute（每步按定义重算）和 fast（增量维护），
             # 两者必须逐次一致，否则是测试工具自身的问题，而不是 spclust 的问题。
+            # 这里算的是**完整树**（min_sim=0），所以比对的是整棵树，比只比阈值以上那段更强。
             use_brute = len(order) <= BRUTE_MAX_N
-            o = oracle.hac(order, edges, lk, args.min_sim, "brute" if use_brute else "fast")
+            mode = "brute" if use_brute else "fast"
+            o = oracle.hac(order, edges, lk, 0, mode)
+            o_cut = oracle.cut(o, args.min_sim)
             outcome, detail = None, ""
             if use_brute:
-                o_fast = oracle.hac(order, edges, lk, args.min_sim, "fast")
+                o_fast = oracle.hac(order, edges, lk, 0, "fast")
                 if o["merges"] != o_fast["merges"] or o["partition"] != o_fast["partition"]:
                     outcome, detail = "ORACLE", "brute 与 fast 两个 oracle 实现不一致"
                 else:
                     selfcheck += 1
 
+            # oracle 自检 2：切树的单调性。
+            # "把完整树切在 X 处" 必须等于 "直接用 X 当停止条件跑一遍" ——
+            # 这依赖相似度沿合并序列单调不增（三种链接都是可归约的）。不成立就说明
+            # 切树语义有问题，而 spclust 的 --cut 正是这么切的。
+            o_stop = oracle.hac(order, edges, lk, args.min_sim, mode)
+            if o_stop["partition"] != o_cut:
+                outcome, detail = "ORACLE", "切树与提前停止得到的分组不一致（单调性不成立？）"
+            else:
+                selfcheck += 1
+
             # “截断镜像”：验证 spclust 与精确定义的偏差是否完全来自 unsigned short 截断
-            o_trunc = oracle.hac(order, edges, lk, args.min_sim, "trunc")
+            o_trunc = oracle.hac(order, edges, lk, 0, "trunc")
+            o_trunc_cut = oracle.cut(o_trunc, args.min_sim)
 
             if outcome is None:
                 got = oracle.parse_spclust(run_spclust(REPO / f"{args.bin_prefix}{MTD_BY_LINKAGE[lk]}",
-                                                       case_path), order)
-                outcome, detail = compare(o, got, order)
+                                                       case_path, args.min_sim), order)
+                outcome, detail = compare(o, got, order, o_cut)
 
                 if outcome != "PASS" and o_trunc["merges"] != o["merges"] \
-                        and trunc_explains(o, o_trunc, got):
+                        and trunc_explains(o, o_trunc, got, o_trunc_cut):
                     # 偏差能由“每步截断成整数”解释 —— 即旧的 unsigned short 问题回来了
                     outcome = "TRUNC"
                     detail = "【回归】偏差可由 unsigned short 整数截断解释；" \
@@ -305,6 +330,19 @@ def main(argv=None):
                 elif (name, lk) in known and outcome == "PASS":
                     outcome = "XPASS"
                     detail = f"[已知分歧已消失] {known[(name, lk)]}"
+
+                # 多阈值切树一致性：既然两边都拿到了**完整树**，就可以在若干阈值处
+                # 各自切一刀再比 —— 这直接验证 --cut 这个功能。
+                # 只在合并序列完全一致（PASS）时做：有并列最大值的用例合并顺序本就可能不同，
+                # 切出来的分组自然也可能不同。
+                if outcome == "PASS":
+                    got_tree = {"objects": o["objects"], "merges": got["merges"]}
+                    for t in CUT_LEVELS:
+                        if oracle.cut(got_tree, t) != oracle.cut(o, t):
+                            outcome, detail = "FAIL", f"在 cut={t} 处切开的分组不一致"
+                            break
+                    else:
+                        cut_checks += len(CUT_LEVELS)
 
             counts[lk][outcome] = counts[lk].get(outcome, 0) + 1
             if outcome in ("FAIL", "ORACLE", "TRUNC"):
@@ -330,7 +368,8 @@ def main(argv=None):
         for k, v in counts[lk].items():
             total[k] += v
     print("-" * 78)
-    print(f"oracle 自检（brute 与 fast 逐次一致）: {selfcheck} 次")
+    print(f"oracle 自检（brute/fast 一致 + 切树=提前停止）: {selfcheck} 次")
+    print(f"多阈值切树一致性检查: {cut_checks} 次")
     print(f"合计: PASS={total['PASS']} WARN={total['WARN']} KNOWN={total['KNOWN']} "
           f"TRUNC={total['TRUNC']} DRIFT={total['DRIFT']} XPASS={total['XPASS']} "
           f"FAIL={total['FAIL']} ORACLE={total['ORACLE']}")
