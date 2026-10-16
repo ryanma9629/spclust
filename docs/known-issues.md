@@ -1,455 +1,519 @@
-# 已修复与已知问题
+# Fixed issues and known issues
 
-前半是**修过的 bug**（保留细节，因为其中几个的发现过程本身就是这套测试存在的理由），
-后半是**仍然存在**的问题。逐条的实现细节在 git 历史里。
+The first half covers **bugs that were fixed** (with detail, because for several of them the way
+they were found is the reason the test suite exists). The second half covers problems that are
+**still there**. Per-change implementation detail lives in the git history.
 
-## 已修复
+## Fixed
 
-### `average` 的相似度曾用 `unsigned short` 存，每步截断一次，误差会累积
+### Average linkage stored similarities in an `unsigned short`, truncating at every step
 
-修复前的 `src/hac.cpp`：
+The code before the fix:
 
 ```cpp
 unsigned short sim = (sim1 * group1_size + sim2 * group2_size) / (group1_size + group2_size);
 ```
 
-整数除法截断，结果又存回 `unsigned short`，于是**每次合并都向下丢一点**，并且丢掉的量会
-参与下一步计算继续传播。`make test` 当时报了 12 个 `TRUNC`：
+Integer division truncated and the result went back into an `unsigned short`, so **every merge
+lost a little** - and what was lost went on to be used by the next step. `make test` reported 12
+`TRUNC` results at the time:
 
 ```
-rand_n44d80s1.csv（44 对象）第 27 步: oracle=41869.6  spclust=41868   （15 次合并里 12 步偏低）
-rand_n10d30s3.csv: 截断把 262.5 和 262.0 压成同一个值 262 → 产生并列
-                   → 合并顺序变化 → oracle 得到 3 个簇，spclust 得到 4 个
+rand_n44d80s1.csv (44 objects) step 27: oracle=41869.6  spclust=41868   (12 of 15 merges low)
+rand_n10d30s3.csv: truncation collapsed 262.5 and 262.0 into one value, 262 -> a tie
+                   -> the merge order changed -> oracle got 3 clusters, spclust got 4
 ```
 
-关键点：这不只是显示问题 —— **判据本身**（取全局最大相似度）就在被截断后的值上做。
+The point is that this was not merely a display problem: **the criterion itself** (take the
+globally largest similarity) was being applied to truncated values.
 
-**修法**：`sp_sim::sim` / `sp_unit::sim` / `grp_s::sim` 与相关局部变量、
-`add_grp`/`merge_grp` 的形参全部改成 `double`（`src/hac.cpp`、`include/spclust/hac.h`、`src/hac.cpp`）；
-`readdb.cpp` 的 `parse_sim` 改用 `strtod`，顺带开始接受小数（如 `87.5`）。
-`max`/`min` 两种链接本来只比较不平均，不受影响。
+**Fix**: `sp_sim::sim` / `sp_unit::sim` / `grp_s::sim`, the related locals and the parameters of
+`add_grp`/`merge_grp` all became `double`; `parse_sim` in `readdb.cpp` switched to `strtod`,
+which incidentally started accepting fractions such as `87.5`. The `max`/`min` linkages only
+compare and never average, so they were unaffected.
 
-**副作用（正向）**：以前 `if (sim > 0)` 会因为截断把真实存在但很小的平均值变成 0、
-从而丢掉这个候选；现在不会了，所以候选集更贴合定义。
+**A positive side effect**: `if (sim > 0)` used to turn a real but small average into 0 and drop
+the candidate; now it does not, so the candidate set matches the definition more closely.
 
-**验证**：修复后 `TRUNC=0`，12 个用例全部转为 `PASS`；
-146 次逐次相似度比对的最大相对误差 `4.3e-13`（纯打印精度）。
-并且把 `TRUNC` 改成了**失败**类别，所以这个 bug 再回来会直接让 `make test` 红。
+**Verification**: after the fix `TRUNC=0` and all 12 cases became `PASS`; across 146 per-merge
+similarity comparisons the largest relative error is `4.3e-13` (pure print precision). `TRUNC` was
+also reclassified as a **failure**, so if this bug ever came back `make test` would go red
+immediately.
 
-### `get_max()` 里的 heap-use-after-free（行内相似度全为 0 时）
+### A heap-use-after-free in `get_max()` (when a whole row had similarity 0)
 
-max 修复循环用的是 `if (u->sim > max)`，`max` 初值 0，于是**整行相似度都是 0 的行永远不会被重新赋值**。
-如果这一行原来的 max 指向的单元正好在本次被删的列里，`vec_dim1[i].max` 就会保留一个已 free 的指针，
-下一次 `get_max()` 直接读它。
+The max-repair loop used `if (u->sim > max)` with `max` initialised to 0, so **a row whose
+similarities were all 0 was never reassigned**. If that row's old max pointed into the column being
+removed, `vec_dim1[i].max` kept a freed pointer and the next `get_max()` read it.
 
-触发条件（`tests/cases/22_zero_row_max.csv`）：某行的 max 是被删列里的一个 0 相似度单元，
-同时该行还有另一个 0 单元**存活**（所以这一行没有变空 —— 变空的情况原本已经处理）。
-默认的 average 链接 + 一条 `sim=0` 的输入边就能触发，不需要 `LINKAGE_MTD=1`。
+Trigger (`tests/cases/22_zero_row_max.csv`): a row's max is a similarity-0 cell in the removed
+column while another 0-valued cell on that row **survives** (so the row does not become empty -
+the empty case was already handled). The default average linkage plus one input edge with `sim=0`
+is enough; `LINKAGE_MTD=1` is not needed.
 
-修法：扫出该行的真实最大值并无条件赋值，指针永远要么是有效单元要么是 NULL。
-并列行为不变（仍是"链上第一个取得最大值的单元"），而 0 值的 max 永远不会被 `get_max()` 选中
-（那里是严格 `>`）。
+Fix: scan the row for its true maximum and assign unconditionally, so the pointer is always either
+a live cell or NULL. Tie behaviour is unchanged (still "the first cell on the chain attaining the
+maximum"), and a 0-valued max can never be chosen by `get_max()` (which uses a strict `>`).
 
-**值得注意的是它是怎么被发现的**：差分测试对这个输入报 **PASS** —— 因为刚 free 的内存读回来恰好还是 0，
-合并顺序也一样。**只有 ASan 抓到了它**。所以结果比对和内存安全是两个独立的检查，缺一不可。
+**How it was found is the interesting part**: the differential test reported **PASS** for that
+input - the just-freed memory happened to read back as 0 and the merge order came out the same.
+**Only ASan caught it.** Comparing results and checking memory safety are two independent jobs, and
+both are needed.
 
-### 每次合并的三趟 O(n) 全量扫描（性能）
+### Three O(n) sweeps per merge (performance)
 
-旧 `merge_grp` 为每次合并分配 3 个 O(n) 的标记向量，然后
+The old `merge_grp` allocated three O(n) mark vectors per merge and then did
 
 ```cpp
-for (size_t i = 0; i < dim1_size; i++)   // dim1_size ≈ 2n
-    if (update_dim1[i]) { ... }          // 被标记的只有 O(degree) 个
+for (size_t i = 0; i < dim1_size; i++)   // dim1_size ~ 2n
+    if (update_dim1[i]) { ... }          // only O(degree) are marked
 ```
 
-即**用一个 O(n) 的全量扫描去筛出 O(degree) 个下标**。加上 `get_max()` 和 max 修复循环，
-每次合并共 4 趟全量扫描。实测（n=40000、18293 次合并）：
+i.e. it used an O(n) full sweep to filter out O(degree) indices. Together with `get_max()` and the
+max-repair loop that was four full sweeps per merge. Measured (n=40000, 18293 merges):
 
 ```
-update_dim1 循环   926,710,622 次迭代
-update_dim2 循环   927,123,378 次迭代
-max 修复循环       926,7xx,xxx 次迭代
-get_max()          926,769,374 次迭代
+update_dim1 loop   926,710,622 iterations
+update_dim2 loop   927,123,378 iterations
+max repair loop    926,7xx,xxx iterations
+get_max()          926,769,374 iterations
 ------------------------------------------------
-合计              ≈3.7e9 次迭代，等效约 0.8 ns/次
+total              ~3.7e9 iterations, about 0.8 ns each
 ```
 
-修法：只遍历被标记的下标，标记缓冲跨合并复用（只复位本次触及过的位置），于是每步是 O(degree) 而不是 O(n)。
-顺带解决两件事：
+Fix: iterate only the marked indices, with the mark buffers reused across merges (resetting only
+the positions touched). Every step became O(degree) instead of O(n). Two things came along for
+free:
 
-- **两个更新循环的循环体逐字相同**，对同一个下标 x 都是 `get_unit(x, group1)` / `get_unit(x, group2)`。
-  所以 x 同时落在两趟里时，旧实现会为同一个 `(x, grp_size)` 插入两个数值相同的**重复单元**。
-  合并成一趟后这些重复单元消失（n=40000 时 malloc 次数从 1,121,925 降到 1,097,456，少 2.2%）。
-- 每次合并不再分配 O(n) 内存（中间那 3 个标记向量）。
+- **The two update loops had byte-identical bodies**, both doing `get_unit(x, group1)` and
+  `get_unit(x, group2)` for the same index x. So when x appeared in both passes the old code
+  inserted two **duplicate cells** with equal values for the same `(x, grp_size)`. Merging them
+  into one pass removes those (at n=40000 mallocs dropped from 1,121,925 to 1,097,456, 2.2% fewer).
+- No more O(n) allocation per merge (the three mark vectors).
 
-**实测 2.2 倍加速，且输出逐字节相同**（28 个输入 × 3 种 linkage，包含 DEBUG=2 的完整合并日志）。
-但**复杂度类别没有变**，因为 `get_max()` 仍然是每次合并 O(n)，即 O(n²) —— 见下面的性能实测。
+**Measured 2.2x faster with byte-identical output** (28 inputs x 3 linkages, including the full
+DEBUG=2 merge log). But **the complexity class did not change**, because `get_max()` was still
+O(n) per merge, i.e. O(n²) - see the next item.
 
-### `get_max()` 每次合并 O(组数) 的扫描（性能）
+### `get_max()` scanning O(groups) per merge (performance)
 
-P0-1 之后 `get_max()` 已经是聚类段 **57~78%** 的时间：它每次合并都扫一遍所有行，
-总共 O(n²)。改成最大堆后是 O(1)。
+After the previous change `get_max()` was **57-78%** of the clustering phase: it swept every row on
+every merge, O(n²) in total. A max-heap makes it O(1).
 
-这里踩了一个坑，值得记下来：第一版写成"索引堆 + 就地更新"（每行在堆里最多一项，
-key 实时从 `vec_dim1[row].max` 读，行内 max 变了就就地 sift）。**这是错的。**
-一次合并会改掉 k 行的 key，堆数组的次序立刻与当前 key 不再对应；而 `sift_up` /
-`sift_down` 都假定"除待修的那一处之外处处是有效堆"，所以逐个就地 sift 并**不能**
-把堆序修回来。差分测试抓到了它：`LINKAGE=2` 的 `rand_n44d25s1.csv` 第 21 步
-oracle 取 167、spclust 却取 63（堆顶不是全局最大）。
+A trap was hit here and is worth recording: the first version was an "index heap with in-place
+updates" (one entry per row, keys read live from `vec_dim1[row].max`, sifting in place when a row's
+max changed). **That is wrong.** One merge changes the keys of k rows, so the heap array's order no
+longer matches the current keys - and `sift_up`/`sift_down` both assume "the heap is valid
+everywhere except the one place being repaired", so sifting each position in place **cannot**
+restore it. The differential test caught it: for `LINKAGE=2`, `rand_n44d25s1.csv` step 21, the
+oracle took 167 while spclust took 63 (the heap top was not the global maximum).
 
-正确做法是**把 key 冻结在堆项里**（`struct SimEntry { sim; row; version; }`）：
-堆序永远和项本身一致，于是堆永远有效。行内 max 变化时推进该行版本号并压入新项，
-旧项靠版本号作废。这样做的额外好处是：
+The correct approach is to **freeze the key inside the heap entry** (`struct SimEntry { sim; row;
+version; }`): the heap order is then always consistent with the entries and the heap is always
+valid. When a row's max changes its version is bumped and a new entry pushed, with old entries
+invalidated by version. The extra benefits:
 
-- 不需要任何"项在堆里的位置"簿记，也不需要让更新幂等
-- 不依赖调用顺序，可以在 `add_grp` / 摘除 group1,group2 / max 重扫处**就地**维护
-- 堆操作完全不碰 `vec_dim1`，所以合并中途那些暂时悬垂的 max 指针与堆无关
-- 作废项堆积到活行数 4 倍以上时重建一次（只保留当前项 + Floyd 建堆），
-  重建代价按堆自身大小算，因此摊还 O(1)，内存仍是 O(活行数)
+- no bookkeeping of "where an entry sits in the heap", and no need for idempotent updates
+- no dependence on call order: it can be maintained **in place** in `add_grp`, when removing
+  group1/group2, and in the max rescan
+- heap operations never touch `vec_dim1`, so the max pointers that dangle temporarily mid-merge
+  are irrelevant to the heap
+- when invalidated entries outnumber live rows by 4x the heap is rebuilt once (keeping only current
+  entries plus Floyd heapify); the cost scales with the heap size, so it is O(1) amortised while
+  memory stays O(live rows)
 
-并列行为与原扫描一致：堆序先比相似度、相等时行号小的优先。
+Tie behaviour matches the old sweep: compare similarity first, and on a tie the smaller row index
+wins.
 
-### `init_grp` 里 `map<string,size_t>` 的字符串查找（性能）
+### `map<string,size_t>` string lookups in `init_grp` (performance)
 
-采样画像显示**初始化段已经和聚类段同量级**，而它的开销集中在按对象名查找：
+The sampled profile showed **the init phase had grown to the same order as the clustering phase**,
+with its cost concentrated in name lookups:
 
 ```
-init_grp()                 728     <- 函数自身
-_platform_memcmp           497     <- 字符串比较
-__tree...__emplace_unique  287     <- map 查找
-（对照：malloc/free 相关帧合计 ~50，get_max 25）
+init_grp()                 728     <- the function itself
+_platform_memcmp           497     <- string comparison
+__tree...__emplace_unique  287     <- map lookup
+(for comparison: malloc/free-related frames ~50 in total, get_max 25)
 ```
 
-原代码**每条边要查 4 次树**：`find(obj1)` + `find(obj2)` + `op[](obj1)` + `op[](obj2)`，
-每次 O(log n) 次字符串比较。改成 `unordered_map`，并用 `insert` 返回的迭代器复用结果，
-每条边只剩 2 次哈希查找（哈希命中时不做字符串比较）：
+The original code **walked the tree four times per edge**: `find(obj1)` + `find(obj2)` +
+`op[](obj1)` + `op[](obj2)`, each O(log n) string comparisons. Switching to
+`unordered_map` and reusing the iterator `insert` returns leaves two hash lookups per edge (with no
+string comparison on a hash hit):
 
 ```cpp
 pair<obj_id_map::iterator, bool> o1 = map_obj_grp.insert({sims[i].obj1, map_obj_grp.size()});
 ...
-add_grp(o1.first->second, o2.first->second, sims[i].sim);   // 不再 op[] 重查一遍
+add_grp(o1.first->second, o2.first->second, sims[i].sim);   // no op[] re-lookup
 ```
 
-id 仍然是“对象首次出现的顺序”，所以聚类与输出完全不变（差分测试与逐字节对比都确认）。
+Ids are still assigned in first-appearance order, so clustering and output are completely unchanged
+(confirmed by the differential test and a byte-for-byte comparison).
 
-实测初始化段：400k 边 0.127 → 0.024 s，800k 边 0.283 → 0.053 s，都是 **5.3x**。
+Measured init: 400k edges 0.127 -> 0.024 s and 800k edges 0.283 -> 0.053 s, both **5.3x**.
 
-### `get_unit()` 的线性查找（性能）—— 单项收益最大
+### `get_unit()`'s linear search (performance) - the single biggest win
 
-`-fno-inline` 采样归因显示它**单独占整个程序约 51%**（965 / 1890 采样）：
+Attribution with `-fno-inline` showed it was **about 51% of the whole program on its own** (965 of
+1890 samples):
 
 ```
 get_unit(...)          965
 <deduplicated_symbol>  281
 merge_grp(...)         101
-malloc/free 全部帧      177
+all malloc/free frames 177
 add_grp(...)            62
 heap_sift_down(...)     61
 ```
 
-每个需要更新的下标原本要调两次 `get_unit()`，它沿链线性查找（平均链长 8.4，
-800k 边时累计 3670 万步）。但这两条边**本来就在收集阶段已经走过的那 4 条链上**：
+Every index needing an update called `get_unit()` twice, which walks a chain linearly (mean chain
+length 8.4; 36.7 million steps at 800k edges). But those two edges **are already on the four chains
+the collection phase walks anyway**:
 
-对下标 x 和组 g（g 只可能是 group1 或 group2）：
+For index x and group g (g is either group1 or group2):
 
-- `x > g` 时，单元 `(g, x)` 在**行 g** 的链上；
-- `x < g` 时，单元 `(x, g)` 在**列 g** 的链上。
+- when `x > g` the cell `(g, x)` is on the chain of **row g**;
+- when `x < g` the cell `(x, g)` is on the chain of **column g**.
 
-而收集阶段要走的正好是行 group1、行 group2、列 group1、列 group2 这 4 条链。
-所以收集时顺手把值记进 `sim_g1[]` / `sim_g2[]`，更新阶段直接读，
-`get_unit()` 就只剩每次合并的那一个调用（取合并单元自身）。
+The collection phase walks exactly row group1, row group2, column group1 and column group2. So the
+values are recorded into `sim_g1[]` / `sim_g2[]` while collecting, and the update phase reads them
+directly, leaving `get_unit()` with one call per merge (to fetch the merged cell itself).
 
-两个实现细节：
+Two implementation details:
 
-- 用 `-1` 作“没有这条边”的哨兵 —— 相似度非负（读取端限制在 `[0,65535]`），所以安全；
-- **首次写入生效**：`get_unit()` 是沿链从头部（`add_grp` 头插，即最后插入的单元）
-  找第一个匹配，首次写入正好对应同一个单元。重复 pair 的输入下行为也保持一致。
+- `-1` is the sentinel for "no such edge" - safe because similarities are non-negative (the reader
+  limits them to `[0,65535]`);
+- **the first write wins**: `get_unit()` walks from the head of the chain (`add_grp` inserts at the
+  head, i.e. the most recently inserted cell) and takes the first match, so the first write
+  corresponds to the same cell. Behaviour stays identical on duplicate-pair input.
 
-代价是两张 O(组数) 的 `double` 表，只复位本次触及过的位置；实测峰值内存 **+0.5~1.5%**。
+The cost is two O(groups) `double` arrays, reset only where touched; measured peak memory
+**+0.5 to +1.5%**.
 
-聚类段加速：n=20k/40k/80k/200k → 1.76x / 1.62x / 1.78x / **1.88x**。
+Clustering speedups: n=20k/40k/80k/200k -> 1.76x / 1.62x / 1.78x / **1.88x**.
 
-### 读入端缓存 `vector<sp_sim> sims`（内存）
+### The reader buffered a `vector<sp_sim> sims` (memory)
 
-原来读取端先把**全部边**存进一个全局 `vector<sp_sim>`，再让初始化遍历它 ——
-而它在"读完 + 建完结构"之后就再也没被用过。
+The reader used to store **every edge** in a global `vector<sp_sim>` for the initialiser to walk -
+and nothing used it after "read everything, build everything" was done.
 
-代价实测（1M 条边、n=10 万、拓扑完全相同，只改对象名长度）：
+Measured cost (1M edges, n=100k, identical topology, only the object-name length changed):
 
-| 对象名 | 峰值 RSS |
+| Object names | Peak RSS |
 |---|---|
-| 8 字符（走 SSO，不额外分配） | 202 MB |
-| 64 字符（走堆，每个字符串约 65 字节） | 371 MB |
+| 8 characters (SSO, no extra allocation) | 202 MB |
+| 64 characters (heap, about 65 bytes per string) | 371 MB |
 
-**差的 169 MB 就是它。** 改成流式（`readdb(path, handler)`，每条边解析出来就回调建结构）
-之后这份缓存直接不存在，峰值 RSS 减半：
+**The 169 MB difference is that buffer.** Switching to streaming (`readdb(path, handler)`, calling
+back per parsed edge) removed it entirely and halved peak RSS:
 
-| 边数 | n | 峰值 RSS 上版 | 本轮 | 变化 |
+| Edges | n | Peak RSS before | After | Change |
 |---|---|---|---|---|
 | 200k | 20k | 44.4 MB | 26.6 MB | **-40%** |
 | 400k | 40k | 86.3 MB | 46.4 MB | **-46%** |
 | 800k | 80k | 174.0 MB | 88.8 MB | **-49%** |
 | 2M | 200k | 401.3 MB | 222.9 MB | **-45%** |
 
-**但纯流式有个陷阱**：把建结构插进解析循环，解析阶段的 cache 工作集会不断被结构增长污染。
-实测 2M 条边时"读+建"从 0.313 s 涨到 0.416 s（+33%），整体慢 7%；
-而聚类段完全不受影响（0.884 → 0.887），所以问题确实在那一段的 locality 上。
+**But purely streaming has a trap**: interleaving structure building into the parsing loop lets the
+growing structure pollute the parse phase's cache working set. Measured at 2M edges, "read + build"
+went from 0.313 s to 0.416 s (+33%), 7% slower overall, while clustering was unaffected
+(0.884 -> 0.887) - so the problem really was that phase's locality.
 
-所以加了一层**小批量缓冲**：读满 65536 条再统一回调，让解析阶段和建结构阶段各自保持批量。
+Hence **small-batch buffering**: fill 65536 edges, then call back in one go, keeping both phases
+batched.
 
-| 方案 | 时间（2M 边，中位）| 峰值 RSS |
+| Approach | Time (2M edges, median) | Peak RSS |
 |---|---|---|
-| 先全读再建（原版） | 1.303 s | 401.3 MB |
-| 纯流式 | 1.393 s | 219.4 MB |
-| **流式 + 64k 批** | **1.301 s** | **223.0 MB** |
+| Read everything first (original) | 1.303 s | 401.3 MB |
+| Purely streaming | 1.393 s | 219.4 MB |
+| **Streaming + 64k batches** | **1.301 s** | **223.0 MB** |
 
-一步到位：内存少 44%，时间不变（只多一批缓冲的 3.6 MB）。
-顺带删掉了已经没人用的 `struct sp_sim`；字符串现在从读入端 `move` 进 map，每条边少一次拷贝。
+The best of both: 44% less memory at the same speed (costing one batch buffer, 3.6 MB). The now
+unused `struct sp_sim` was deleted, and names are moved from the reader into the map, saving one
+copy per edge.
 
-### 组号从 `size_t` 改成 `uint32_t`（内存 + 速度）
+### Group numbers from `size_t` to `uint32_t` (memory + speed)
 
-组号范围是 `[0, 2*对象数)`，`uint32` 足够，`sizeof(sp_unit)` 从 56 字节降到 48 字节。
+Group numbers live in `[0, 2*objects)`, so `uint32` suffices, and `sizeof(sp_unit)` dropped from 56
+to 48 bytes.
 
-| 规模 | 峰值 RSS 56B | 48B | 变化 | 时间（交替取中位）| 加速 |
+| Scale | Peak RSS 56B | 48B | Change | Time (alternating median) | Speedup |
 |---|---|---|---|---|---|
-| 800k 边 | 88.8 MB | 76.6 MB | **-13.7%** | 0.464 → 0.385 s | **1.21x** |
-| 2M 边 | 222.9 MB | 192.4 MB | **-13.7%** | 1.474 → 1.370 s | **1.10x** |
+| 800k edges | 88.8 MB | 76.6 MB | **-13.7%** | 0.464 -> 0.385 s | **1.21x** |
+| 2M edges | 222.9 MB | 192.4 MB | **-13.7%** | 1.474 -> 1.370 s | **1.10x** |
 
-（代价：对象数上限约 21 亿 —— 到那个量级地址空间会先耗尽。）
+(The cost: an object limit of about 2.1 billion, where the address space would run out first.)
 
-### 探测实验：节点尺寸是一阶因素
+### A probe: node size is a first-order factor
 
-为了决定"值不值得做指针改下标的大重构"，做了一个**放大探测** ——
-在结构体末尾补 padding 把节点从 48 撑到 128 字节（2.67 倍，字段偏移不变，其它代码一字不改）：
+To decide whether a big pointer-to-index refactor was worth it, an **amplification probe** was run:
+pad the struct from 48 to 128 bytes (2.67x, same field offsets, no other code changed).
 
-| 版本 | 800k 边 | 2M 边 |
+| Version | 800k edges | 2M edges |
 |---|---|---|
-| 48B（当前） | 0.427 s | 1.485 s |
-| 128B | 0.498 s（**1.167x 慢**）| 1.511 s（1.018x 慢）|
+| 48B (current) | 0.427 s | 1.485 s |
+| 128B | 0.498 s (**1.167x slower**) | 1.511 s (1.018x slower) |
 
-结论：**节点尺寸确实影响显著**，而 malloc/free 不影响（节点池实测 1.00x）——
-两者不矛盾：池不改变 `sizeof(sp_unit)`，即不改变每个节点跨的 cache line 数。
+Conclusion: **node size really does matter**, while malloc/free does not (the node pool measured
+1.00x). The two are not contradictory: the pool does not change `sizeof(sp_unit)`, so it does not
+change how many cache lines a node spans.
 
-### 链接从指针改成下标：32 字节节点（性能 + 内存）
+### Links from pointers to indices: 32-byte nodes (speed + memory)
 
-四个链接和两个组号改成 `uint32` 下标，整池放在一块连续内存里：
+The four links and both group numbers became `uint32` indices, with the whole pool in one
+contiguous block:
 
 ```
-sizeof(sp_unit):  4*8(指针) + 2*4(组号) + 8(sim) = 48   ->   4*4(链接) + 2*4 + 8 = 32 字节
+sizeof(sp_unit):  4*8(pointer) + 2*4(groups) + 8(sim) = 48   ->   4*4(links) + 2*4 + 8 = 32 bytes
 ```
 
-| 规模 | 时间（交替取中位）| 加速 | 峰值 RSS | 变化 |
+| Scale | Time (alternating median) | Speedup | Peak RSS | Change |
 |---|---|---|---|---|
-| 800k 边 | 0.393 → 0.266 s | **1.49x** | 76.6 → 63.3 MB | **-17.3%** |
-| 2M 边 | 1.337 → 0.954 s | **1.40x** | 189.0 → 155.2 MB | **-17.9%** |
+| 800k edges | 0.393 -> 0.266 s | **1.49x** | 76.6 -> 63.3 MB | **-17.3%** |
+| 2M edges | 1.337 -> 0.954 s | **1.40x** | 189.0 -> 155.2 MB | **-17.9%** |
 
-（三个统计量——最小 / 下四分位 / 中位——都一致，不是噪声。）
+(Min, lower quartile and median all agreed, so this is not noise.)
 
-这个改动本来是**被我判过死刑的**。当时用"把节点撑到 128 字节"的探测得出"尺寸是二阶因素"，
-但那两次测量只用 7 次和 5 次重复，正好落在噪声里 —— 见下面「方法学教训」第 2 条。
-用 11 次重测后，尺寸其实是一阶因素，于是这个重构从"不值得"变成了值得。
+This change had **already been rejected once**. The "pad to 128 bytes" probe had suggested size was
+a second-order factor, but those two measurements used only 7 and 5 repetitions, right in the
+noise - see methodology lesson 2 below. Re-measured with 11 runs, size turned out to be first-order,
+which turned the refactor from "not worth it" into "worth it".
 
-**两个实现上的坑，都记下来：**
+**Two implementation traps, both recorded:**
 
-1. **空链接必须用 0，并且 0 号节点要保留成哨兵。**
-   `vec_dim1/vec_dim2` 扩容时是**值初始化（清零）**的。以前 `head`/`max` 是裸指针，
-   清零正好就是 NULL；换成下标之后 0 变成了一个**合法的节点下标**，
-   于是每个空行都指向 0 号节点，链立刻乱掉（表现为死循环）。
-   现在 `SP_NONE = 0`、0 号节点永不出借，既和值初始化一致，分支也更少。
+1. **An empty link must be 0, and node 0 must be reserved as a sentinel.**
+   `vec_dim1`/`vec_dim2` are **value-initialised (zeroed)** when they grow. When `head`/`max` were
+   raw pointers, zero was exactly NULL; with indices, 0 became a **valid node index**, so every
+   empty row pointed at node 0 and the chains fell apart (as an infinite loop). Now `SP_NONE = 0`
+   and node 0 is never handed out, which is consistent with value-initialisation and needs fewer
+   branches.
 
-2. **池用 `malloc`/`realloc` 直接管，不要用 `std::vector`。**
-   vector 扩容是"新块 + 拷贝 + 释放旧块"，而系统的分配器不会立刻把大块还给操作系统，
-   于是每次搬迁都留下一个常驻的中间块：按 1.25 倍扩要 **150 MB**（而节点总共才 26 MB！），
-   按 2 倍扩也要 85 MB。`realloc` 对大块常常能原地扩张，既不拷贝也不产生中间块，
-   峰值直接降到 63 MB。
+2. **Manage the pool with `malloc`/`realloc`, not `std::vector`.**
+   Growing a vector means "new block + copy + release old", and the allocator does not return large
+   blocks to the OS promptly, so every move left a resident intermediate block: growth by 1.25x cost
+   **150 MB** (for 26 MB of nodes in total!) and even 2x cost 85 MB. `realloc` can usually extend
+   large blocks in place with neither a copy nor an intermediate block, taking the peak down to
+   63 MB.
 
-**ASan 的 use-after-free 检测没有丢。** 池里的内存始终可访问，ASan 原本看不见
-"节点被释放之后又被读" —— 而那正是这个代码库里出现过两次的 bug 类型。
-所以释放时用 `__asan_poison_memory_region` 毒化该节点、分配时解除毒化；
-池搬家时先整片解除、搬完按空闲表重做。**空闲下标单独存一个数组，不借用节点自身的字段**
-—— 否则遍历空闲表本身就会撞上毒化。
+**ASan's use-after-free detection was not lost.** The pool's memory stays accessible, so ASan could
+not see "a node was freed and then read" - the very bug class that had appeared twice in this code
+base. So a node is poisoned with `__asan_poison_memory_region` on release and unpoisoned on
+allocation; when the pool moves the whole block is unpoisoned first and re-poisoned from the free
+list afterwards. **Free indices live in their own array rather than borrowing fields from the
+nodes** - otherwise walking the free list would itself hit poisoned memory.
 
-这条防线是验证过的：故意在 `get_max()` 里读一个已释放节点，ASan 立刻报
-`use-after-poison ... in get_max()`（另见 `tests/` 的用例 22，那是真抓到过的 UAF）。
+This defence was verified: deliberately reading a released node inside `get_max()` makes ASan report
+`use-after-poison ... in get_max()` immediately (see also case 22 in `tests/`, a use-after-free that
+was really hit).
 
-### 单链接改走 Kruskal（性能 + 内存）—— 300 倍
+### Single linkage moved to Kruskal (speed + memory) - 300x
 
-单链接的簇间相似度 = 两个簇之间所有**原始边**的最大值（`max` 不稀释），
-所以整棵合并树等价于**把边按相似度降序排序，再用并查集逐个合并**（Kruskal / MST）。
-于是 `LINKAGE_MTD == 1` 完全不需要相似度矩阵：只要 m 条边加一次排序。
+Single linkage's inter-cluster similarity is the maximum over all **original edges** between two
+clusters (the max is not diluted), so the whole merge tree equals **sorting the edges by similarity
+descending and merging with a union-find** (Kruskal / MST). `LINKAGE_MTD == 1` therefore needs no
+similarity matrix at all: m edges plus one sort.
 
-| n | 边数 | 贪心（旧）| Kruskal（新）| 加速 | 贪心峰值内存 | Kruskal |
+| n | Edges | Greedy (old) | Kruskal (new) | Speedup | Greedy peak RSS | Kruskal |
 |---|---|---|---|---|---|---|
 | 20,000 | 200k | 1.767 s | 0.0277 s | **63.7x** | 2261 MB | **16.5 MB** |
 | 40,000 | 400k | 7.428 s | 0.0581 s | **127.9x** | 6251 MB | **28.1 MB** |
 | 80,000 | 800k | 35.416 s | 0.1180 s | **300.2x** | **15765 MB** | **50.3 MB** |
 
-加速比随规模增长（旧的是 O(n²) 量级，新的是 O(m log m)），内存差两个数量级 ——
-贪心那 15.8 GB 就是把相似度图撑成了近完全图。
+The speedup grows with scale (the old path was O(n²), the new one O(m log m)) and memory differs by
+two orders of magnitude - that 15.8 GB was the similarity graph being inflated into a near-complete
+graph.
 
-**并列下的合并顺序可能与旧实现不同**，但单链接的簇在任何阈值处都等于
-“只保留 `sim >= X` 的边之后各连通分量”，与处理顺序无关；所以每个阈值处切出来的分组、
-以及每个簇的紧致度（簇内最大边）都完全一致。
-这一点是当作验收标准测过的：**23 个输入 × 10 个阈值 = 230 组，与旧贪心实现的结果逐组相同**。
-差分套件自身也照常通过（`max` 31 个 PASS + 900 次切树检查里的对应部分）。
+**Merge order under ties may differ from the old implementation**, but under single linkage the
+clusters at any threshold equal "the connected components after keeping only edges with
+`sim >= X`", which is independent of processing order. So the partition at every threshold, and
+every cluster's cohesion (the largest intra-cluster edge), are completely unchanged. That was tested
+as an acceptance criterion: **23 inputs x 10 thresholds = 230 combinations, each identical to the
+old greedy implementation**. The differential suite still passes as usual (`max` 31 PASS results
+plus the corresponding part of the 900 cut checks).
 
-### `grp[].objs` 只用来取 `size()`：改成成员计数（内存 -28%）
+### `grp[].objs` was only used for `size()`: replaced by a member count (memory -28%)
 
-活组里原来存着一份 `vector<string>` 成员列表。但成员名现在由**合并树**（`merges`）
-+ `object_names` 提供（`cut_tree` 切开后按 id 取名字），所以那份列表**只被用来取
-`size()`**；`tools/spclust_cli.cpp` 甚至完全不读 `grp`。改成记一个 `n_members` 计数。
+A live group used to carry a `vector<string>` member list. But member names now come from the
+**merge tree** (`merges`) plus `object_names` (the CLI looks names up by id after cutting), so that
+list was **only used to get `size()`**; `tools/spclust_cli.cpp` does not even read `grp`. It was
+replaced by an `n_members` count.
 
-去掉的不只是拷贝，还有一块被忽略的常驻内存：`grp[g].objs.clear()` 只清元素、
-**保留 capacity**，而 `grp` 会增长到 2n 个槽位 —— 那些退役槽位把成员列表的容量一直占着。
+What that removed was not only the copies but also a piece of overlooked resident memory:
+`grp[g].objs.clear()` clears elements while **keeping capacity**, and `grp` grows to 2n slots - those
+retired slots held the member lists' capacity forever.
 
-| | 中位墙钟（n=200k/1M 边）| 峰值 RSS |
+| | Median wall clock (n=200k / 1M edges) | Peak RSS |
 |---|---|---|
-| 改动前 | 3.511 s | 183.6 MB |
-| 改动后 | 3.285 s | **132.0 MB** |
-| 变化 | 1.069x | **-28.1%** |
+| Before | 3.511 s | 183.6 MB |
+| After | 3.285 s | **132.0 MB** |
+| Change | 1.069x | **-28.1%** |
 
-同时做了两处小清理：
+Two small cleanups came along:
 
-- 读入阶段结束后把「名称 → id」的映射（`unordered_map`）释放掉 —— 之后再也用不到，
-  长期运行的库场景能回收约 7 MB 常驻内存。（**不降低峰值**：峰值出现在读入阶段，
-  那时映射和结构同时在场。）
-- 顺手确认了一条**采样归因不成立**的猜测：画像里 `vector<unsigned int>::__base_destruct_at_end`
-  占 7%，看着像是空闲表的增删开销，但把它换成裸数组 + 栈顶下标后**实测 0 收益**。
-  再次说明采样只能指方向，收益必须靠 A/B 实测。
+- After reading, the name-to-id map (`unordered_map`) is released - it is never needed again, and in
+  a long-running library scenario this returns about 7 MB of resident memory. (**It does not lower
+  the peak**: the peak occurs during reading, when the map and the structure are both present.)
+- A **sampling attribution that did not hold** was confirmed: the profile showed
+  `vector<unsigned int>::__base_destruct_at_end` at 7%, which looked like free-list churn, but
+  replacing it with a raw array plus a top index measured **zero gain**. Sampling points a
+  direction; only A/B measurement establishes a gain.
 
-### 一批小优化的实测结果：五个候选里只有两个成立
+### A batch of small optimisations: only two of five survived
 
-想把剩下的零碎再压一点（预期总 5~10%）。**逐个 A/B 之后，只有两条成立**：
+The intent was to squeeze the remaining odds and ends (expecting 5-10% in total). **After A/B-ing
+each one, only two held**:
 
-| 改动 | 预期 | 实测 | 结论 |
+| Change | Expected | Measured | Verdict |
 |---|---|---|---|
-| `mark_flags`/`sim_g1`/`sim_g2` 预分配到整个 id 空间 | 1~3% | +1.1~2.1%（bench_mid）| **留** |
-| `add_grp` 7 次字段写 → 一次聚合赋值 | 1~3% | （与上一条合并测）| **留** |
-| `sort(updated)`/`sort(dirty_max)` 换插入排序 | 1~2% | **−21%** | **回退** |
-| 堆压缩阈值 4×live → 2×live | 1~3% | 0%（噪声内）| **回退** |
-| 读入端手工扫描替代 `split_fields` | 3~5% | 上限只有 ~2%，没做 | **不做** |
+| pre-size `mark_flags`/`sim_g1`/`sim_g2` to the whole id space | 1-3% | +1.1-2.1% (bench_mid) | **kept** |
+| `add_grp`: seven field writes -> one aggregate assignment | 1-3% | (measured with the above) | **kept** |
+| `sort(updated)`/`sort(dirty_max)` -> insertion sort | 1-2% | **-21%** | **reverted** |
+| heap compaction threshold 4x live -> 2x live | 1-3% | 0% (within noise) | **reverted** |
+| hand-rolled scanning in the reader instead of `split_fields` | 3-5% | ceiling only ~2%, not done | **not done** |
 
-**插入排序那次的错误值得记下来**：我把"`get_unit` 的平均链长 8.4"当成了"每次合并受影响
-的下标数"。后者实测是 **38**（1,402,219 次迭代 / 36,564 次合并 = 38.3），而插入排序是
-O(k²) —— 在 k≈38 时比 introsort 慢 7 倍，整体慢 21%。这个数字已写进代码注释，免得以后
-又有人去"优化"它。
+**The insertion-sort mistake is worth recording**: the mean `get_unit` chain length of 8.4 was
+mistaken for the number of indices affected per merge. The latter measures **38** (1,402,219
+iterations over 36,564 merges), and insertion sort is O(k²) - at k ~ 38 that is 7x slower than
+introsort, i.e. 21% slower overall. That number is now in a code comment so nobody "optimises" it
+again.
 
-**读入端为什么不做**：读+建结构占总量 15~22%（bench_large：0.114 s / 0.749 s），看起来
-挺大，但其中 `add_grp` 约 7%、名称哈希约 4%，留给"解析本身"（`split_fields`/`trim` 的
-字符串构造）只有约 4%。即使把解析改快一半也只有 ~2%，正好是本机重复测量能分辨的量级边缘，
-不值得为此重写解析路径、冒行为漂移的风险。
+**Why the reader was left alone**: read plus structure building is 15-22% of the total (bench_large:
+0.114 s of 0.749 s), which looks significant, but `add_grp` is about 7% of it and name hashing
+about 4%, leaving roughly 4% for parsing itself (the string construction in `split_fields`/`trim`).
+Halving parsing would therefore gain about 2% - right at the edge of what repeated measurement can
+resolve on this machine, and not worth rewriting the parse path and risking behaviour drift.
 
-### 库化/整洁度的一批收尾
+### A final round of library hygiene and tidiness
 
-| 项 | 改动 |
+| Item | Change |
 |---|---|
-| `readdb` 的错误处理 | 从内部 `exit(1)` 改成**返回 0 表示失败**（原因打到 stderr），退出码交给 `main` —— 否则没法当库用 |
-| min 链接的紧致度 | 单元素组的 `sim` 初值改成 `EMPTY_COHESION`：min 链接的合并式是 `min(...)`，0 是吸收元，所以原来报告的紧致度恒为 0。现在 `LINKAGE=2` 的 `sim=` 是簇内最小边（sim.csv：`85 / 82 / 76`，原来是 `0 / 0 / 0`），**分组完全不变** |
-| 删掉未使用的宏 | `MIN_ACCT_NUM` / `MIN_SIM_WG` |
-| `--tree-depth <N>` | 树状图深度上限参数化（默认 6，0 = 不限，隐含 `--tree`）|
-| 头文件不再污染命名空间 | `src/hac.cpp` 去掉 `using namespace std;`，结构体里的类型写 `std::`；`include/spclust/hac.h` / `readdb.h` 同步限定；三个 .cpp 各自 `using` |
-| 去掉全局变量串联 | `grp` 从「main.cpp 定义 + spclust.cpp `extern`」收进 `src/hac.cpp` 成为文件静态 |
+| `readdb` error handling | from an internal `exit(1)` to **returning 0 on failure** (reason on stderr), leaving the exit code to the caller - otherwise it cannot be used as a library |
+| cohesion under min linkage | a singleton's initial `sim` became `EMPTY_COHESION`: the min recurrence is `min(...)` and 0 is its absorbing element, so the reported cohesion used to be identically 0. Now `LINKAGE=2` reports the smallest intra-cluster edge (sim.csv: `85 / 82 / 76`, previously `0 / 0 / 0`), with the **partition completely unchanged** |
+| unused macros removed | `MIN_ACCT_NUM` / `MIN_SIM_WG` |
+| `--tree-depth <N>` | the dendrogram depth limit became a parameter (default 6, 0 = unlimited, implies `--tree`) |
+| headers no longer pollute namespaces | `src/hac.cpp` dropped `using namespace std;` and qualifies types as `std::`; `include/spclust/hac.h` / `readdb.h` were qualified too; each .cpp does its own `using` |
+| no more wiring globals across files | `grp` moved from "defined in main.cpp, `extern` in spclust.cpp" into `src/hac.cpp` as a file static |
 
-退出码契约现在也被 CLI 测试钉住了：
+The exit code contract is now pinned by the CLI test as well:
 
-| 情况 | 退出码 |
+| Situation | Exit code |
 |---|---|
 | `--help` | 0 |
-| 未知选项 / 多余参数 / `--cut`、`--tree-depth` 缺值 | 2 |
-| 输入文件打不开 / IO 错误 / 一条记录都没有 | 1 |
+| unknown option / extra argument / `--cut`, `--tree-depth` without a value | 2 |
+| input file cannot be opened / IO error / no records at all | 1 |
 
-**顺带修了两个基础设施问题，都是这轮自己踩出来的：**
+**Two infrastructure problems were fixed as a side effect, both self-inflicted in that round:**
 
-1. `make test` / `make bench` 原来只依赖 `linkages`，**不依赖 `./spclust`** —— 于是 CLI 测试可能跑在旧二进制上。
-   这轮就发生了：我把 `readdb` 的返回值检查加进 `tools/spclust_cli.cpp` 时补丁没生效，而 CLI 测试**仍然是 Pass**
-   （它测的是上一次构建的二进制）。现在 `test`/`bench` 都依赖 `$(BIN)`。
-2. 那次补丁之所以没生效，是因为 `oldText` 早就不匹配了（调用点已经从 `readdb(argc>1?...)` 改成
-   `readdb(path, ...)`），而我**忘了加断言**，于是静默跳过。教训：补丁脚本一律加断言。
+1. `make test` / `make bench` depended on `linkages` but **not on `./spclust`**, so the CLI test
+   could run against a stale binary. It happened: a patch adding a `readdb` return-value check to
+   `tools/spclust_cli.cpp` did not apply, and the CLI test **still passed** (it was testing the
+   previous build). Now `test`/`bench` both depend on `$(BIN)`.
+2. That patch failed because its `oldText` no longer matched (the call site had changed from
+   `readdb(argc>1?...)` to `readdb(path, ...)`) and **the assertion was missing**, so it silently
+   did nothing. Lesson: patch scripts always get an assertion.
 
-## 已知问题
+## Known issues
 
-以下都是实测/静态分析得出的结论。
-前两项**已由 `make test` 复现**（有对应标记），后面几项只是静态分析。
+Everything below comes from measurement or static analysis. The first two **have been reproduced by
+`make test`** (with the corresponding marks); the rest are static analysis only.
 
-### 1. 重复 pair：语义已定义（取最大值），两边不再分歧
+### 1. Duplicate pairs: semantics defined (the maximum wins), so the two sides no longer disagree
 
-同一个 `(obj1, obj2)` 出现多次且 `sim` 不同时，语义是**取较大的那个值**。
-这不是猜的：取最大值和交换两行顺序，结果都是合并成同一对、值都是 90；
-实现上合并值来自 `get_max()`（行内最大值），派生相似度统一按最大值记录
-（`record_sim_g1/g2`）。oracle 已按同一语义建模，所以**这个分歧已经不存在了**
-（原先登记的 6 条 known divergence 变成 XPASS 后已删除）。
+When the same `(obj1, obj2)` appears more than once with different `sim`, the semantics are **the
+larger value wins**. This is not a guess: taking the maximum and swapping the two lines both merge
+the same pair with value 90; internally the merge value comes from `get_max()` (the row maximum) and
+derived similarities are recorded by maximum too (`record_sim_g1/g2`). The oracle models the same
+semantics, so **this divergence no longer exists** (the six known divergences that were registered
+became XPASS and were deleted).
 
-两个单元仍然都会进结构（`get_unit` 可能返回其中任意一个，但只用于"稍后再释放"的标记，
-不影响结果），合并不崩溃、也不泄漏。用例：`tests/cases/07_duplicate_edge.csv`、`19_duplicate_order.csv`。
+Both cells still go into the structure (`get_unit` may return either, but only for the "release
+later" mark, so the result is unaffected); merging neither crashes nor leaks. Cases:
+`tests/cases/07_duplicate_edge.csv`, `19_duplicate_order.csv`.
 
-改这一处时顺手统一了实现：原来派生相似度用的是"链上第一个"（即最后插入的那个），
-于是"这一对自身的合并值"取最大、"它派生出的新相似度"取最后插入 —— 同一份重复输入两套语义。
-现在全部取最大。
+Changing this also unified the implementation: derived similarities used to take "the first on the
+chain" (i.e. the most recently inserted), so "the merge value of this pair" took the maximum while
+"the new similarities it derives" took the last inserted - two semantics for one duplicate input.
+Everything takes the maximum now.
 
-### 2. 自环（`obj1 == obj2`）会破坏结构前提，读取端已丢弃
+### 2. Self-loops (`obj1 == obj2`) break the structural premise, and the reader drops them
 
-`add_grp` 的所有逻辑都建立在 `group1 < group2` 上，自环会让 `group1 == group2`，
-行链和列链互相踩踏。当前的 `readdb.cpp` 会打印警告并跳过，这是**必要**的，不是可选项。
+All of `add_grp`'s logic rests on `group1 < group2`, and a self-loop makes `group1 == group2`, so the
+row and column chains stomp on each other. `readdb.cpp` prints a warning and skips such lines, which
+is **necessary**, not optional.
 
-### 3. `max`/`min`（现在的 `Linkage::MaxSimilarity` / `MinNonzero`）不是标准链接 —— 但都已处理好
+### 3. `max`/`min` (now `Linkage::MaxSimilarity` / `MinNonzero`) are not standard linkages - both handled
 
-`1`（注释写 complete）取 `max`，按距离语义的标准术语是**单链接**；
-`2`（注释写 single）取 `min` 且要求两边都存在，是**全链接**的一个变体。
-注意：这个命名与 `sparseAHC`（稀疏相似度矩阵 AHC 的参考实现）的文档完全一致，
-在“相似度矩阵”这一支里是惯例，不一定是笔误。
+`1` (commented "complete") takes `max`, which in standard distance terms is **single linkage**; `2`
+(commented "single") takes `min` and requires both sides to exist, a variant of **complete linkage**.
+Note that this naming matches the sparseAHC documentation exactly - in the "similarity matrix"
+branch it is conventional and not necessarily a typo.
 
-两者**都不是问题**了：
+Neither is a problem any more:
 
-- `1`（单链接）以前在稀疏图上会稠密化：`max` 不稀释，`sim(i,G)` 只要簇 i 对 G 有
-  **任意一条边**就为正，于是簇级相似度图变成原图的**传递闭包**（近乎完全图）——
-  n=40000 / 400k 边实测要建 93,418,345 个单元（边数的 234 倍）、7.35 s；
-  n=80000 / 800k 边时峰值内存 **15.8 GB**。
-  现在走 **Kruskal**：单链接的簇间相似度就是两个簇之间所有**原始边**的最大值，
-  所以整棵树等价于“边按相似度降序 + 并查集”，根本不建矩阵。见下面「已修复」。
+- `1` (single linkage) used to densify on sparse graphs: the max is not diluted, so `sim(i,G)` is
+  positive as long as cluster i has **any** edge to G, turning the cluster-level similarity graph
+  into the **transitive closure** of the input (a near-complete graph) - measured at n=40000 /
+  400k edges it built 93,418,345 cells (234x the edge count) in 7.35 s, and at n=80000 / 800k edges
+  peak memory was **15.8 GB**. It now goes through **Kruskal**: single linkage's inter-cluster
+  similarity is the maximum over all **original edges**, so the whole tree equals "edges sorted by
+  similarity descending plus union-find" and no matrix is built. See "Fixed" above.
 
-- `2` 的 `grp[].sim` 恒为 0（见第 4 条），只影响输出的紧致度报告。
+- `2`'s `grp[].sim` was identically 0 (see item 4), affecting only the cohesion report.
 
-另外，`add_grp(i, grp_size, max(sim1, sim2))` 原本没有 `if (sim > 0)` 保护。
-补上它是**对的**（值为 0 表示两簇之间根本没有边，而 `get_max()` 本来就不选相似度 <= 0 的单元，
-所以不改变任何结果），但**它不是性能问题的原因** —— 实测那个保护只去掉
-52,147 / 93,418,345 = 0.06% 的单元。我一开始把 8 倍慢归因给它，是错的。
+Separately, `add_grp(i, grp_size, max(sim1, sim2))` originally had no `if (sim > 0)` guard. Adding
+it is **correct** (a value of 0 means there is no edge at all between the clusters, and `get_max()`
+never picks a cell with similarity <= 0, so no result changes) but **it was not the cause of the
+performance problem** - measured, that guard removes only 52,147 / 93,418,345 = 0.06% of the cells.
+Attributing the 8x slowdown to it was wrong.
 
-### 4. `min`（现在的 `Linkage::MinNonzero`）时 `grp[].sim` 恒为 0
+### 4. Under `min` (now `Linkage::MinNonzero`), `grp[].sim` is identically 0
 
-单元素组的 `sim` 初值是 0，而 `min(min(...), max_sim)` 一旦碰到 0 就永远是 0。
-只影响输出的紧致度报告，不影响合并顺序。
+A singleton's `sim` starts at 0, and `min(min(...), max_sim)` is 0 forever once it meets a 0. This
+affects only the cohesion report, not the merge order.
 
-### 5. “缺失边 = 0”这个语义本身会稀释簇间相似度
+### 5. "An absent edge is 0" inherently dilutes inter-cluster similarity
 
-不是 bug，但值得写进文档：平均链接的分母是全部 `|A|·|B|` 对，所以簇越大，越容易被“稀释”。
-用例 `05_chain_bridge.csv` 就是实例：`a3-b1 = 58` 是两组之间唯一的高于阈值的边，
-但 `a1-a3` 缺边，一次合并后 `{a1,a2}` 对 `a3` 的相似度就只有 `(0+94)/2 = 47`，
-桥在触发合并之前就沉到阈值以下了。`sparseAHC` 采用同样的分母，所以这不是实现差异，
-而是这种建模方式的固有性质；如果你的簇形状应该由连通性（而不是平均数）决定，
-要在归一化上做选择（比如分母改成实际存在的边数）。
+Not a bug, but worth documenting: average linkage's denominator is all `|A|·|B|` pairs, so the larger
+the clusters the more diluted they get. Case `05_chain_bridge.csv` is an instance: `a3-b1 = 58` is
+the only above-threshold edge between the two groups, but `a1-a3` is absent, so after one merge the
+similarity of `{a1,a2}` to `a3` is only `(0+94)/2 = 47` and the bridge sinks below the threshold
+before it can trigger a merge. sparseAHC uses the same denominator, so this is not an implementation
+difference but inherent to the model; if your cluster shape should be decided by connectivity rather
+than by a mean, you have to choose a different normalisation (for example dividing by the number of
+edges that actually exist).
 
-### 6. 以下只是静态分析，测试未区分（因为结果不受影响）
+### 6. Static analysis only; the tests do not distinguish these (results are unaffected)
 
-- `grp` / `vec_dim1` / `vec_dim2` 单调增长到约 2n-1，被合并的槽位清空但不回收。
-- `MIN_ACCT_NUM`、`MIN_SIM_WG` 定义了但从未使用。→ 已删。
-- `using namespace std;` 放在头文件里，`grp` 靠全局变量 + `extern` 串起来。→ 已改：
-  头文件不再 `using namespace std`，34 个文件静态变量全部收进 `spclust::detail::HACImpl`
-  （一个对象一份状态）。详见 [design](design.md#状态与实例)。
+- `grp` / `vec_dim1` / `vec_dim2` grow monotonically to about 2n-1; merged slots are cleared but
+  never reclaimed.
+- `MIN_ACCT_NUM` and `MIN_SIM_WG` were defined but never used. -> deleted.
+- `using namespace std;` lived in headers and `grp` was wired up with globals plus `extern`. ->
+  fixed: the headers no longer say `using namespace std`, and all 34 file statics moved into
+  `spclust::detail::HACImpl` (one object, one state). See
+  [design](design.md#state-and-instances).
 
-### 验证记录
+### Verification record
 
-- `make test` 现在跑两段：差分测试（算法）+ CLI 测试（接口契约，8 组检查全过，含退出码契约）。
-- `make bench`：性能护栏，连续两次与基线一致（0.90~1.09x）；`-O0` 合成回归能被抓到。
-- `make asan` / `make asan-cases`：在 `sim.csv` 和全部 22 个用例上无内存错误、无 UB。
-- `make leaks`：`0 leaks for 0 total leaked bytes`（`free_mem()` 释放了全部链表节点）。
-- `make test`：`cut` = 20 / 50 / 70 / 200 四个阈值下均 `RESULT: PASS`，`TRUNC=0`，`KNOWN=0`。
-- 堆正确性：`LINKAGE=2` 的 `rand_n44d25s1.csv` 抓到过「堆顶不是全局最大」，修好之后
-  该用例与其余输入一起逐字节一致。
-- 差分套件现在**没有任何 KNOWN 分歧**：唯一登记过的（重复 pair 语义）在把语义定成
-  「取最大值」并对齐 oracle 之后消失，6 条登记随之删除。
-- 等价性：22 个用例 + 7 个随机图 + `sim.csv` 共 31 个输入 × 3 种 linkage，
-  完整 DEBUG 输出（含每次合并的相似度）**逐字节相同**，仅打印的整秒数不同。
-- 性能：各版交替执行取最小墙钟（≥11 次，最小/下四分位/中位须一致）。
-  800k 边 5.906 → 0.270 s（**21.9x**）；2M 边 47.204 → 0.925 s（**51.1x**）。
-- 内存：`grp[].objs` 改成员计数后峰值再降 **28%**（183.6 → 132.0 MB @1M 边）；读入端改流式 + 小批量后峰值 RSS 下降 **40~49%**（2M 边：401 → 223 MB），时间中性；
-  节点从 56 压到 48 字节再降 **13.7%**（223 → 192 MB），速度同时提升 1.10~1.21x。
+- `make test` now runs two parts: the differential test (algorithm) and the CLI test (interface
+  contract, 11 checks all passing, including the exit-code contract).
+- `make bench`: the performance guard, matching the baseline on two consecutive runs (0.90-1.09x);
+  a synthetic `-O0` regression is caught.
+- `make asan` / `make asan-cases`: no memory errors and no UB on `sim.csv` and all 22 cases.
+- `make leaks`: `0 leaks for 0 total leaked bytes` (`free_mem()` releases every list node).
+- `make test`: `cut` = 20 / 50 / 70 / 200 all give `RESULT: PASS`, with `TRUNC=0` and `KNOWN=0`.
+- Heap correctness: `LINKAGE=2` on `rand_n44d25s1.csv` once caught "the heap top is not the global
+  maximum"; after the fix that case is byte-identical along with every other input.
+- The differential suite now has **no KNOWN divergences at all**: the one that was registered
+  (duplicate-pair semantics) disappeared once the semantics were fixed to "the maximum wins" and the
+  oracle was aligned, and the six entries were deleted.
+- Equivalence: 22 cases + 7 random graphs + `sim.csv`, 31 inputs x 3 linkages, full DEBUG output
+  (including the similarity of every merge) is **byte-identical**; only the printed whole seconds
+  differ.
+- Performance: alternating runs with the minimum wall clock taken (>= 11 runs, min/lower
+  quartile/median agreeing). 800k edges 5.906 -> 0.270 s (**21.9x**); 2M edges 47.204 -> 0.925 s
+  (**51.1x**).
+- Memory: replacing `grp[].objs` with a member count cut the peak by a further **28%**
+  (183.6 -> 132.0 MB at 1M edges); streaming the reader cut peak RSS by **40-49%** (2M edges:
+  401 -> 223 MB) at no time cost; shrinking nodes from 56 to 48 bytes cut a further **13.7%**
+  (223 -> 192 MB) while running 1.10-1.21x faster.
