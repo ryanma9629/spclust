@@ -1,8 +1,80 @@
-#include "spclust.h"
-#include "readdb.h"
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2022-2026 Ryan Ma <pningma@sina.com>
+
+#include "spclust/hac.h"
+
+#include <algorithm>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <cstring>
+#include <limits>
+#include <new>
+#include <stdexcept>
 #include <utility>
+#include <vector>
 
 using namespace std;
+
+// ---------------------------------------------------------------------------
+// 编译期选项。链接方式目前仍是编译期常量（换它要重编译本库），这是下一步要改的。
+//   0 = average linkage
+//   1 = max（单链接，走 Kruskal 路径）
+//   2 = min（仅当两条边都存在时才更新）
+// ---------------------------------------------------------------------------
+#ifndef LINKAGE_MTD
+#define LINKAGE_MTD 0
+#endif
+
+namespace spclust {
+
+//单元素组的"组内平均相似度"初值。
+//
+//average / max 的合并式里 0 是合适的初值；但 min 链接的合并式是 min(min(g1,g2), max_sim)，
+//0 是吸收元，会让紧致度报告恒为 0。单元素组本来就没有"组内边"，
+//它的初值应该是**空集的 +∞**，这样 min 才有意义。
+#if 2 == LINKAGE_MTD
+static const double EMPTY_COHESION = numeric_limits<double>::infinity();
+#else
+static const double EMPTY_COHESION = 0.0;
+#endif
+
+//聚类过程中保存相似性的节点。
+//
+//四个链接和两个组号都存**下标**而不是指针，整个池是一块连续内存：
+//   sizeof(sp_unit) = 4*4(链接) + 2*4(组号) + 8(sim) = 32 字节（原来 48）
+//实测节点尺寸是一阶因素（把节点人为撑到 128 字节会慢 1.17x），所以这一压是值得的。
+//
+//空链接用 0。0 号节点是**保留的空哨兵**，不参与任何链表 ——
+//这样 vec_dim1/vec_dim2 resize 时的值初始化（清零）天然就是"空"，
+//与原来 head/max 是裸指针时零初始化即 NULL 的行为一致。
+static const uint32_t SP_NONE = 0;
+
+struct sp_unit {
+	uint32_t right;
+	uint32_t down;
+	uint32_t left;
+	uint32_t up;
+	uint32_t group1;
+	uint32_t group2;
+	double sim;
+};
+//“左向量”中的元素
+struct p_dim1 {
+	uint32_t head;
+	uint32_t max;
+};
+//"顶向量“中的元素
+struct p_dim2 {
+	uint32_t head;
+};
+//聚类过程中的活组：组内平均相似度 + 成员数。
+//这里**不保存成员列表**：成员由合并树 + 调用方的 id->名字映射提供，
+//存列表只会白白复制（详见 README 的「已修复」）。
+struct grp_s {
+	double sim;
+	std::size_t n_members;
+};
 
 //“左向量”，记录每个横向链的头、值最大节点
 vector<p_dim1> vec_dim1;
@@ -55,10 +127,8 @@ static size_t arena_live = 0;
 static uint32_t node_alloc(void) {
 	if (0 == arena_used) {
 		arena = (sp_unit*)calloc(1, sizeof(sp_unit));   // 下标 0 保留为空哨兵，永不出借
-		if (NULL == arena) {
-			cerr << "Arena allocation error." << endl;
-			exit(1);
-		}
+		if (NULL == arena)
+			throw std::bad_alloc();
 		arena_cap = 1;
 		arena_used = 1;
 	}
@@ -74,10 +144,8 @@ static uint32_t node_alloc(void) {
 		//realloc 可能搬家，而搬家要读旧内容 —— 其中可能有被毒化的空闲节点，先整片解除
 		SP_UNPOISON_RANGE(arena, arena_used * sizeof(sp_unit));
 		sp_unit* p = (sp_unit*)realloc(arena, want * sizeof(sp_unit));
-		if (NULL == p) {
-			cerr << "Arena allocation error." << endl;
-			exit(1);
-		}
+		if (NULL == p)
+			throw std::bad_alloc();
 		arena = p;
 		arena_cap = want;
 		for (size_t k = 0; k < arena_free_list.size(); k++)
@@ -103,11 +171,10 @@ static vector<size_t> updated;            // 需要重算相似度的下标（�
 static vector<size_t> dirty_max;          // max 指针失效、需要重扫的行
 static vector<size_t> touched;            // 本次置过位的位置，用于 O(k) 复位
 
-//合并树。每次 merge_grp 成功合并一对就追加一条 —— 这就是层次聚类的完整输出，
-//MIN_SIM_CLUST 从"停止条件"变成了"切树的位置"（见 main.cpp 的 cut_tree）。
-vector<merge_rec> merges;
+//合并树。每次成功合并一对就追加一条 —— 这就是层次聚类的完整输出，
+//阈值（--cut / cut()）只是切树的位置，不再是停止条件。
+static vector<Merge> merges;
 static size_t n_objects = 0;
-static vector<string> object_names;   // id -> 对象名
 
 //本次合并中，下标 x 到 group1 / group2 的相似度。相似度非负（读取端限制 [0,65535]），
 //所以 -1 可以安全地表示"没有这条边"。
@@ -263,17 +330,12 @@ static void note_row_changed(size_t row) {
 	}
 }
 
-//将对象名称映射到初始组
-//用 unordered_map 而不是 map：这一步是按名称找对象，不需要有序，只需要快。
-//实测（800k 边 / 8 万对象的采样画像）字符串查找是初始化段的主要开销。
-typedef unordered_map<string, size_t> obj_id_map;
-obj_id_map map_obj_grp;
 //聚类过程中的活组表。
 //以前它定义在 main.cpp、这里用 extern 串起来；现在收进本文件（main.cpp 已经不读它了）。
 static vector<grp_s> grp;
 
 //将一个(group1, group2, sim)的节点加入结构，每次加入所在链表的头位置
-uint32_t add_grp(size_t group1, size_t group2, double sim) {
+static uint32_t add_grp(size_t group1, size_t group2, double sim) {
 	//始终保证group1小于group2
 	if (group1 > group2)
 		swap(group1, group2);
@@ -318,7 +380,7 @@ uint32_t add_grp(size_t group1, size_t group2, double sim) {
 }
 
 //获取全局结构中值最大的节点（堆顶，摊还 O(1)）
-uint32_t get_max(void) {
+static uint32_t get_max(void) {
 	//丢掉被版本号作废的堆顶
 	while (!heap.empty()) {
 		const SimEntry& e = heap[0];
@@ -340,7 +402,7 @@ uint32_t get_max(void) {
 }
 
 //根据(group1, group2, sim)定位该节点
-uint32_t get_unit(size_t group1, size_t group2) {
+static uint32_t get_unit(size_t group1, size_t group2) {
 	//始终保证group1小于group2
 	if (group1 > group2)
 		swap(group1, group2);
@@ -397,7 +459,7 @@ static uint32_t krusk_find(uint32_t x) {
 	return x;
 }
 
-void clust_kruskal(double floor) {
+static void clust_kruskal(double floor) {
 	sort(krusk_edges.begin(), krusk_edges.end(), krusk_order);
 
 	const size_t n = n_objects;
@@ -419,20 +481,14 @@ void clust_kruskal(double floor) {
 			continue;               // 已经在同一个簇里（重复边或成环）
 
 		uint32_t node = (uint32_t)next_id++;
-		merge_rec rec;
+		Merge rec;
 		rec.left = ra;
 		rec.right = rb;
-		rec.sim = e.sim;
+		rec.similarity = e.sim;
 		//紧致度 = 簇内最大边 = 原来的 max(max(g1,g2), max_sim)
 		rec.cohesion = max(max(cohesion_of[ra], cohesion_of[rb]), e.sim);
 		rec.size = size_of[ra] + size_of[rb];
 		merges.push_back(rec);
-
-		//喂给测试 runner 的合并日志（格式与贪心路径一致）
-		if (DEBUG >= 2)
-			cout << "\tGroup " << ra << " and group " << rb <<
-				" are merged into group " << node << " (sim=" << setprecision(12)
-				<< e.sim << ")." << endl;
 
 		//两个集合的代表都指向新节点
 		krusk_parent[ra] = node;
@@ -441,53 +497,46 @@ void clust_kruskal(double floor) {
 		cohesion_of.push_back(rec.cohesion);
 		size_of.push_back(rec.size);
 
-		if (DEBUG >= 1 && 0 == merges.size() % DEBUG_FREQ_CLUST)
-			cout << "\t" << merges.size() << " merges, sim=" << e.sim << "." << endl;
 	}
 }
 
-//把一条边加入结构。原来叫 init_grp()：先把全部边读进 vector<sp_sim> sims，
-//再在这里遍历。现在由 readdb 边读边回调，那份 O(边数) 的缓存直接不存在了
-//（实测 1M 条边、长对象名时可省 169 MB 峰值内存）。
-//obj1/obj2 是按值传进来的：readdb 把字符串 move 进参数，这里再 move 进 map，
-//全程零字符串拷贝（原来要先拷进 sims，再拷进 map，再拷进成员列表）。
-void init_add_edge(string obj1, string obj2, double sim) {
-	//每条边 2 次哈希查找（原来 4 次树查找），字符串只在哈希冲突时才比较。
-	//id 仍然是"首次出现顺序"，所以结果不变。
-	pair<obj_id_map::iterator, bool> o1 =
-		map_obj_grp.insert(pair<string, size_t>(std::move(obj1), map_obj_grp.size()));
-	if (o1.second) {
-		//映射为当前最大的组号+1（就是插入前的 size()），并让”分组向量“记录obj1自成的新组
-		grp.resize(map_obj_grp.size());
-		grp[map_obj_grp.size() - 1].sim = EMPTY_COHESION;
-		grp[map_obj_grp.size() - 1].n_members = 1;
-		object_names.push_back(o1.first->first);   // id -> 名字，供输出用
-	}
+//喂一条边。库里**不存对象名**：id 由调用方给（约定是稠密的 0..n-1），
+//出现新 id 就登记成一个新的单元素组。
+void add_edge(uint32_t a, uint32_t b, double sim) {
+	//自环会破坏内部"行号 < 列号"的前提（add_grp 的所有逻辑都建立在这上面）
+	if (a == b)
+		throw std::invalid_argument("spclust::add_edge: self-loop is not supported");
+	//相似度必须是有限的非负数；用 !(sim >= 0.0) 可以一并挡掉 NaN
+	if (!(sim >= 0.0))
+		throw std::invalid_argument("spclust::add_edge: similarity must be finite and non-negative");
+	if (a > b)
+		swap(a, b);
 
-	pair<obj_id_map::iterator, bool> o2 =
-		map_obj_grp.insert(pair<string, size_t>(std::move(obj2), map_obj_grp.size()));
-	if (o2.second) {
-		grp.resize(map_obj_grp.size());
-		grp[map_obj_grp.size() - 1].sim = EMPTY_COHESION;
-		grp[map_obj_grp.size() - 1].n_members = 1;
-		object_names.push_back(o2.first->first);
+	if (grp.size() <= b) {
+		//新出现的 id 登记成单元素组。调用方如果跳号（稀疏 id），
+		//中间那些槽位也会成为"没有边的对象" —— 见头文件里的 id 约定。
+		size_t old_size = grp.size();
+		grp.resize((size_t)b + 1);
+		for (size_t i = old_size; i <= b; i++) {
+			grp[i].sim = EMPTY_COHESION;
+			grp[i].n_members = 1;
+		}
 	}
 
 	if (1 == LINKAGE_MTD) {
 		//单链接不需要稀疏结构，只攒边表（后面走 Kruskal）。这一支是编译期常量，
 		//所以 add_grp 那条路根本不会被执行到。
 		krusk_edge e;
-		e.a = (uint32_t)o1.first->second;
-		e.b = (uint32_t)o2.first->second;
+		e.a = a;
+		e.b = b;
 		e.sim = sim;
 		krusk_edges.push_back(e);
 	} else
 		//把组信息而不是对象信息加入全局结构
-		add_grp(o1.first->second, o2.first->second, sim);
+		add_grp(a, b, sim);
 }
 
-//将group1和group2两组聚合，形成新组grp_k，更新其它组到grp_k的相似度
-size_t merge_grp(size_t group1, size_t group2, double max_sim) {
+static size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 	//“左向量”的长度，由于把两个组合并过程中该向量长度会改变，用dim1_size记录合并前的长度，不能用vec_dim1.size()
 	size_t dim1_size = vec_dim1.size();
 	//聚合之前group1和group2两组的对象个数
@@ -759,7 +808,7 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 }
 
 //释放结构占用内存
-void free_mem(void) {
+static void free_mem(void) {
 	//节点池是一整块连续内存，整个还掉即可，不需要逐节点遍历释放。
 	//先把毒化标记整体解除，别把它们留给已经还给分配器的内存。
 	if (NULL != arena)
@@ -800,23 +849,8 @@ void free_mem(void) {
 	live_rows = 0;
 }
 
-size_t tree_object_count(void) {
-	return n_objects;
-}
-
-//节点 id -> 对象名
-const string& object_name(size_t id) {
-	return object_names[id];
-}
-
-//聚类主过程
-void clust_grp(double floor) {
-	//结构在 readdb 边读边回调时就已经建好了（见 init_add_edge），这里只剩聚类
-	clock_t s_time = clock();
-	clock_t e_time = 0;
-	if (DEBUG >= 1)
-		cout << "Clustering..." << endl;
-
+//算合并树。floor 是"树算到多低"的相似度下限（<=0 表示算完整棵树）。
+void build(double floor) {
 	//初始组（对象）数 = 树的叶子数
 	n_objects = grp.size();
 
@@ -827,25 +861,17 @@ void clust_grp(double floor) {
 	sim_g1.assign(2 * n_objects, -1.0);
 	sim_g2.assign(2 * n_objects, -1.0);
 
-	//读入阶段结束后"名称 -> id"的映射就再也用不到了（输出走 object_names），
-	//把它占的内存还回去 —— n=200k / 1M 边实测峰值少约 7 MB。
-	obj_id_map().swap(map_obj_grp);
-
 	if (1 == LINKAGE_MTD) {
 		//单链接：边按相似度降序 + 并查集，O(m log m)
 		clust_kruskal(floor);
 		free_mem();
-		e_time = clock();
-		if (DEBUG >= 1)
-			cout << "Done. (" << (double)(e_time - s_time) / CLOCKS_PER_SEC << "s)" << endl << endl;
 		return;
 	}
 
 	size_t grp_size = grp.size();
 	//合并到最大相似度 < floor 为止。floor 由调用方给：
-	//  floor = 切树阈值  -> 成本与"直接在阈值处停下"完全一样（默认就是这样）
-	//  floor <= 0        -> 完整树，代价是多做很多次合并（实测 2.2~4.2x，见 README）
-	//记录下来的 merges 就是树；MIN_SIM_CLUST 不再是停止条件，而是切树的默认位置。
+	//  floor = 切树阈值  -> 成本与"直接在阈值处停下"完全一样
+	//  floor <= 0        -> 完整树，代价是多做很多次合并
 	while (grp_size > 1) {
 		uint32_t unit = get_max();
 		if (SP_NONE == unit)
@@ -855,30 +881,113 @@ void clust_grp(double floor) {
 			break;                      // 到 floor 了；想要更深的树就把 floor 调低
 		size_t group1 = arena[unit].group1;
 		size_t group2 = arena[unit].group2;
-		//每次合并，实际组数减少1
-		if (DEBUG >= 1 && 0 == grp_size % DEBUG_FREQ_CLUST)
-			cout << "\t" << grp_size << " groups left with max_sim=" << max_sim << "." << endl;
 		grp_size--;
 		size_t new_grp = merge_grp(group1, group2, max_sim) - 1;
 
-		//记录这次合并（组号即节点 id，见 main.h 的 merge_rec）
-		merge_rec rec;
+		//记录这次合并（组号即节点 id，见 include/spclust/hac.h 的 Merge）
+		Merge rec;
 		rec.left = (uint32_t)group1;
 		rec.right = (uint32_t)group2;
-		rec.sim = max_sim;
+		rec.similarity = max_sim;
 		rec.cohesion = grp[new_grp].sim;
 		rec.size = grp[new_grp].n_members;
 		merges.push_back(rec);
-
-		if (DEBUG >= 2)
-			cout << "\tGroup " << group1 << " and group " << group2 << 
-				" are merged into group " << new_grp << " (sim=" << setprecision(12)
-				<< max_sim << ")." << endl;
 	}
 	//聚类结束，释放结构占用内存
 	free_mem();
-
-	e_time = clock();
-	if (DEBUG >= 1)
-		cout << "Done. (" << (double)(e_time - s_time) / CLOCKS_PER_SEC << "s)" << endl << endl;
 }
+
+// ---------------------------------------------------------------------------
+// 公开接口（见 include/spclust/hac.h）
+// ---------------------------------------------------------------------------
+
+std::size_t num_objects() {
+	return n_objects;
+}
+
+const std::vector<Merge>& tree() {
+	return merges;
+}
+
+const char* linkage_name() {
+#if 0 == LINKAGE_MTD
+	return "0=average";
+#elif 1 == LINKAGE_MTD
+	return "1=max";
+#elif 2 == LINKAGE_MTD
+	return "2=min(nonzero)";
+#else
+	return "unknown";
+#endif
+}
+
+void reserve(std::size_t n_objects_hint, std::size_t n_edges_hint) {
+	//只预留调用方明确知道的容量。节点池按需增长，不在这里一口气要一大块 ——
+	//池的容量策略对峰值内存影响很大（见 README）。
+	grp.reserve(n_objects_hint);
+	merges.reserve(n_objects_hint);
+	krusk_edges.reserve(n_edges_hint);
+}
+
+//切树用的并查集
+static std::vector<std::size_t> uf_parent;
+
+static std::size_t uf_find(std::size_t x) {
+	while (uf_parent[x] != x) {
+		uf_parent[x] = uf_parent[uf_parent[x]];   // 路径减半
+		x = uf_parent[x];
+	}
+	return x;
+}
+
+Cut cut(double min_similarity) {
+	const std::size_t n = n_objects;
+	const std::size_t total = n + merges.size();
+
+	uf_parent.resize(total);
+	for (std::size_t i = 0; i < total; i++)
+		uf_parent[i] = i;
+
+	//相似度沿合并序列单调不增（三种链接都可归约），所以"切"就是取前缀
+	std::size_t k = 0;
+	while (k < merges.size() && merges[k].similarity >= min_similarity)
+		k++;
+	//除了并起两个子节点，还必须把"这次合并产生的新节点"（id = n+i）也指到同一个集合里 ——
+	//否则后面某次合并拿 n+i 当子节点时它会被当成独立元素。
+	for (std::size_t i = 0; i < k; i++) {
+		std::size_t a = uf_find(merges[i].left), b = uf_find(merges[i].right);
+		if (a != b)
+			uf_parent[b] = a;
+		uf_parent[n + i] = uf_find(merges[i].left);
+	}
+
+	//每个簇的紧致度 = 该簇在前缀里最后一次合并写下的 cohesion（后写覆盖先写）
+	std::vector<double> root_cohesion(total, 0.0);
+	for (std::size_t i = 0; i < k; i++)
+		root_cohesion[uf_find(merges[i].left)] = merges[i].cohesion;
+
+	const std::size_t NONE = (std::size_t)-1;
+	std::vector<std::size_t> root_index(total, NONE);
+	Cut res;
+	for (std::size_t id = 0; id < n; id++) {
+		std::size_t r = uf_find(id);
+		if (NONE == root_index[r]) {
+			root_index[r] = res.members.size();
+			res.members.push_back(std::vector<std::uint32_t>());
+			res.cohesion.push_back(root_cohesion[r]);
+		}
+		res.members[root_index[r]].push_back((std::uint32_t)id);
+	}
+	return res;
+}
+
+void reset() {
+	free_mem();
+	grp.clear();
+	std::vector<grp_s>().swap(grp);
+	merges.clear();
+	std::vector<Merge>().swap(merges);
+	n_objects = 0;
+}
+
+} // namespace spclust

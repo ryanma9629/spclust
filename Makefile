@@ -34,29 +34,41 @@ DEBUG   ?= 1
 
 DEFS = -DLINKAGE_MTD=$(LINKAGE) -DMIN_SIM_CLUST=$(MIN_SIM) -DDEBUG=$(DEBUG)
 
-SRCS = main.cpp readdb.cpp spclust.cpp
-HDRS = main.h readdb.h spclust.h
+# 目录结构：库（src/ + include/）与使用者（tools/）分开。
+# 构建系统见 CMakeLists.txt；这个 Makefile 是开发时的快捷方式。
+LIB_SRCS = src/hac.cpp
+CLI_SRCS = tools/spclust_cli.cpp tools/readdb.cpp
+ALL_SRCS = $(CLI_SRCS) $(LIB_SRCS)
+HDRS = include/spclust/hac.h tools/readdb.h tools/cli_config.h
+INCS = -Iinclude -Itools
 DATA = sim.csv
 BIN  = spclust
 
-# 测试用的三种 linkage 二进制：LINKAGE_MTD 是编译期常量，只能各编一个。
-# 它们固定用 DEBUG=2，因为差分测试需要解析 "Group i and group j are merged..." 日志。
+# 测试用的三种 linkage 二进制：LINKAGE_MTD 目前仍是编译期常量，只能各编一个。
 # 二进制名里带上 MIN_SIM，这样 `make test MIN_SIM=70` 不会误用 50 编出来的旧二进制。
-LBIN        = $(BIN)-linkage-$(MIN_SIM)
-TRACE_DEBUG = 2
+LBIN     = $(BIN)-linkage-$(MIN_SIM)
+LIB_A    = libspclust.a
 
-.PHONY: all run test check linkages asan asan-cases leaks bench bench-update clean help
+.PHONY: all lib run test check linkages asan asan-cases leaks bench bench-update clean help
 
 all: $(BIN)
 
-$(BIN): $(SRCS) $(HDRS)
-	$(CXX) $(CXXFLAGS) $(DEFS) $(LDFLAGS) -o $@ $(SRCS) $(LDLIBS)
+$(BIN): $(ALL_SRCS) $(HDRS)
+	$(CXX) $(CXXFLAGS) $(INCS) $(DEFS) $(LDFLAGS) -o $@ $(ALL_SRCS) $(LDLIBS)
 
-$(LBIN)-%: $(SRCS) $(HDRS)
-	$(CXX) $(CXXFLAGS) -DLINKAGE_MTD=$* -DMIN_SIM_CLUST=$(MIN_SIM) -DDEBUG=$(TRACE_DEBUG) \
-		$(LDFLAGS) -o $@ $(SRCS) $(LDLIBS)
+$(LBIN)-%: $(ALL_SRCS) $(HDRS)
+	$(CXX) $(CXXFLAGS) $(INCS) -DLINKAGE_MTD=$* -DMIN_SIM_CLUST=$(MIN_SIM) -DDEBUG=$(DEBUG) \
+		$(LDFLAGS) -o $@ $(ALL_SRCS) $(LDLIBS)
 
 linkages: $(LBIN)-0 $(LBIN)-1 $(LBIN)-2
+
+# 只把库编成静态库（演示"库"这一层是独立的、不依赖 tools/）
+$(LIB_A): $(LIB_SRCS) $(HDRS)
+	$(CXX) $(CXXFLAGS) $(INCS) $(DEFS) -c $(LIB_SRCS) -o hac.o
+	ar rcs $@ hac.o
+	rm -f hac.o
+
+lib: $(LIB_A)
 
 run: $(BIN)
 	./$(BIN) $(DATA)
@@ -85,15 +97,15 @@ check: linkages
 # spclust.cpp 里全是手写 malloc/free 和四向指针，asan 很值得跑
 # 注意：macOS 的 ASan 不支持 detect_leaks（LeakSanitizer 只在 Linux 上可用），
 #       查内存泄漏请用下面的 make leaks（macOS 自带的 leaks 工具）
-asan: $(SRCS) $(HDRS)
-	$(CXX) -std=c++17 -g -O1 -fno-omit-frame-pointer -Wall -Wextra \
-		-fsanitize=address,undefined $(DEFS) -o $(BIN)-asan $(SRCS) $(LDLIBS)
+asan: $(ALL_SRCS) $(HDRS)
+	$(CXX) -std=c++17 -g -O1 -fno-omit-frame-pointer -Wall -Wextra $(INCS) \
+		-fsanitize=address,undefined $(DEFS) -o $(BIN)-asan $(ALL_SRCS) $(LDLIBS)
 	./$(BIN)-asan $(DATA)
 
 # 用 ASan/UBSan 跑一遍全部测试用例（含重复 pair、自环、阈值边界）
-asan-cases: $(SRCS) $(HDRS)
-	$(CXX) -std=c++17 -g -O1 -fno-omit-frame-pointer -Wall -Wextra \
-		-fsanitize=address,undefined $(DEFS) -o $(BIN)-asan $(SRCS) $(LDLIBS)
+asan-cases: $(ALL_SRCS) $(HDRS)
+	$(CXX) -std=c++17 -g -O1 -fno-omit-frame-pointer -Wall -Wextra $(INCS) \
+		-fsanitize=address,undefined $(DEFS) -o $(BIN)-asan $(ALL_SRCS) $(LDLIBS)
 	@fail=0; \
 	for f in tests/cases/*.csv; do \
 		out=$$(./$(BIN)-asan $$f 2>&1) || { echo "退出码非 0: $$f"; echo "$$out" | head -20; fail=1; }; \
@@ -112,7 +124,7 @@ leaks: $(BIN)
 	MallocStackLogging=1 leaks --atExit -- ./$(BIN) $(DATA)
 
 clean:
-	rm -f $(BIN) $(BIN)-asan $(BIN)-linkage-*
+	rm -f $(BIN) $(BIN)-asan $(BIN)-linkage-* $(LIB_A) hac.o
 	rm -rf $(BIN)*.dSYM
 	find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 

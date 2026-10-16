@@ -301,61 +301,66 @@ def cut(result, min_sim):
 # 解析 spclust 的输出
 # ---------------------------------------------------------------------------
 
-RE_MERGE = re.compile(
-    r"Group (\d+) and group (\d+) are merged into group (\d+) \(sim=([0-9.eE+-]+)\)\."
-)
 RE_GROUP = re.compile(r"^Group (\d+) \(size=(\d+), sim=([0-9.eE+-]+)\): (.*)$")
 RE_SINGLE = re.compile(r"^Unclustered \((\d+)\): (.*)$")
 RE_OBJECTS = re.compile(r"^Objects: (\d+), groups: (\d+)$")
 
 
 def parse_spclust(text, order):
-    """把 spclust 的输出解析成和 hac() 同构的结构。
+    """把 CLI 的输出解析成和 hac() 同构的结构。
 
-    order 是对象的首次出现顺序 —— spclust 的初始组号就是这个下标，
-    因此必须两边一致才能把日志里的组号还原成成员集合。
+    合并序列来自 **--matrix**（公开的 linkage 矩阵：left right height size），
+    节点 id 沿用 scipy 约定：0..n-1 是对象、n+i 是第 i 次合并 —— 于是逐行重建
+    出每个节点的成员集合即可。扁平分组来自末尾那几行。
+
+    以前这里解析的是 DEBUG=2 的合并日志，那让测试与一条调试输出格式隐性耦合
+    （改一行输出就可能让 runner 静默地少算），现在改成走公开接口。
+
+    order 是对象的首次出现顺序 —— CLI 就是按这个顺序分配 id 的，
+    所以叶子 id i 对应 order[i]。
     """
-    idx = {o: i for i, o in enumerate(order)}
-    members = {i: [i] for i in range(len(order))}
+    n = len(order)
+    members = {i: [i] for i in range(n)}
     merges = []
     groups, singles = [], []
     objects = None
 
     for line in text.splitlines():
-        line = line.rstrip("\n")
+        s2 = line.strip()
+        if not s2 or s2.startswith("#"):
+            continue
 
-        m = RE_OBJECTS.match(line.strip())
+        m = RE_OBJECTS.match(s2)
         if m:
             objects = int(m.group(1))
             continue
 
-        m = RE_MERGE.search(line)
+        m = RE_GROUP.match(s2)
         if m:
-            g1, g2, g3 = (int(m.group(k)) for k in (1, 2, 3))
-            sim = to_fraction(m.group(4))
-            if sim is None:
-                raise ValueError(f"无法解析日志里的 sim: {line!r}")
-            if g1 not in members or g2 not in members:
-                raise ValueError(f"merge 日志引用了未知组号: {line!r}")
-            A, B = frozenset(members[g1]), frozenset(members[g2])
-            merges.append((_canon(A, B), sim))
-            members[g3] = members[g1] + members[g2]
+            groups.append(frozenset(order.index(x) for x in m.group(4).split()))
             continue
 
-        m = RE_GROUP.match(line.strip())
-        if m:
-            names = m.group(4).split()
-            groups.append(frozenset(idx[x] for x in names))
-            continue
-
-        m = RE_SINGLE.match(line.strip())
+        m = RE_SINGLE.match(s2)
         if m:
             for x in m.group(2).split():
-                singles.append(frozenset([idx[x]]))
+                singles.append(frozenset([order.index(x)]))
             continue
 
+        f = s2.split()
+        if len(f) == 4:
+            try:
+                left, right = int(f[0]), int(f[1])
+            except ValueError:
+                continue
+            height = to_fraction(f[2])
+            if height is None:
+                continue
+            node = n + len(merges)
+            merges.append((_canon(frozenset(members[left]), frozenset(members[right])), height))
+            members[node] = members[left] + members[right]
+
     if objects is None:
-        raise ValueError("没找到 'Objects: N, groups: K' 行，spclust 输出格式可能变了")
+        raise ValueError("没找到 'Objects: N, groups: K' 行，CLI 输出格式可能变了")
 
     partition = frozenset(groups + singles)
     return {

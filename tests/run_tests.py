@@ -130,7 +130,8 @@ def run_spclust(bin_path, case_path, cut):
     proc = subprocess.run(
         # --floor 0：算完整树，这样能与 oracle 的完整树逐次比对（比只比阈值以上更强）。
         # --cut：本次要验证的切树位置。
-        [str(bin_path), str(case_path), "--floor", "0", "--cut", str(cut)],
+        # --matrix：走公开的 linkage 矩阵接口拿逐次合并（不再解析 DEBUG 日志）
+        [str(bin_path), str(case_path), "--floor", "0", "--cut", str(cut), "--matrix"],
         cwd=str(REPO), capture_output=True, text=True,
     )
     if proc.returncode != 0:

@@ -1,6 +1,13 @@
+# 构建产物
 spclust
 spclust-asan
 spclust-linkage-*
+libspclust.a
+hac.o
+build/
+build-*/
 *.dSYM/
 *.o
+
+# Python
 __pycache__/

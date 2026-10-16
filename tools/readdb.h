@@ -1,7 +1,13 @@
 #ifndef READDB_H
 #define READDB_H
 
-#include "main.h"
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2022-2026 Ryan Ma <pningma@sina.com>
+
+#include "cli_config.h"
+
+#include <cstddef>
+#include <string>
 
 // 每条边解析出来就立刻回调，不再把整个输入攒在内存里。
 //

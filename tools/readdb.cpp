@@ -1,10 +1,17 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2022-2026 Ryan Ma <pningma@sina.com>
+
 #include "readdb.h"
 
 #include <cctype>
 #include <cerrno>
+#include <cstdint>
+#include <cstdlib>
 #include <fstream>
+#include <iostream>
 #include <sstream>
 #include <utility>
+#include <vector>
 
 using namespace std;
 
@@ -41,7 +48,8 @@ void split_fields(const string& line, vector<string>& out) {
 	}
 }
 
-//严格解析相似度：必须是 [0,65535] 范围内的十进制数（允许小数，如 87.5）
+//严格解析相似度：必须是 [0, MAX_SIM_READ] 范围内的十进制数（允许小数，如 87.5）。
+//上界是 CLI 的输入契约（历史遗留，库本身没有这个上限）。
 bool parse_sim(const string& s, double& out) {
 	if (s.empty())
 		return false;
@@ -50,8 +58,8 @@ bool parse_sim(const string& s, double& out) {
 	double v = strtod(s.c_str(), &end);
 	if (0 != errno || end == s.c_str() || '\0' != *end)
 		return false;
-	//注意不能写成 (v < 0 || v > 65535)：那样 "nan" 会静默通过
-	if (!(v >= 0.0 && v <= 65535.0))
+	//注意不能写成 (v < 0 || v > MAX_SIM_READ)：那样 "nan" 会静默通过
+	if (!(v >= 0.0 && v <= (double)MAX_SIM_READ))
 		return false;
 	out = v;
 	return true;

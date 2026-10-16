@@ -3,8 +3,8 @@
 # 机器: Apple M5 / Darwin 27.0.0
 # 协议: 每用例重复 N 次，取中位；min/下四分位/中位差异 >15% 视为噪声大
 # 列: 用例 二进制 中位墙钟秒 峰值RSS_MB
-bench_small    spclust    0.0091 4.7
-bench_mid      spclust    0.1059 20.7
-bench_large    spclust    0.4018 47.7
-bench_lowval   spclust    0.0492 20.5
-bench_single   linkage1   0.1292 30.2
+bench_small    spclust    0.0082 4.8
+bench_mid      spclust    0.0969 20.4
+bench_large    spclust    0.2996 47.5
+bench_lowval   spclust    0.0468 20.5
+bench_single   linkage1   0.0861 30.2
