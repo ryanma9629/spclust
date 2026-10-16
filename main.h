@@ -117,9 +117,14 @@ struct merge_rec {
 	size_t size;        // 合并后的簇大小
 };
 
-//聚类结果的元素，组内相似性+成员列表
+//聚类过程中的活组：组内平均相似度 + 成员数。
+//
+//注意这里**不再保存成员列表**：成员名由合并树（merges）+ object_names 提供，
+//输出时经 cut_tree/object_name 取得，所以原来那份 vector<string> 只被用来取 size()。
+//去掉之后省掉了每次合并复制成员列表的开销，以及 2n 个 vector 对象的常驻内存
+//（n=200k 时约 10 MB）。
 struct grp_s {
 	double sim;
-	vector<string> objs;
+	size_t n_members;
 };
 #endif

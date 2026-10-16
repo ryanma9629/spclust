@@ -459,8 +459,8 @@ void init_add_edge(string obj1, string obj2, double sim) {
 		//映射为当前最大的组号+1（就是插入前的 size()），并让”分组向量“记录obj1自成的新组
 		grp.resize(map_obj_grp.size());
 		grp[map_obj_grp.size() - 1].sim = 0;
-		grp[map_obj_grp.size() - 1].objs.push_back(o1.first->first);
-		object_names.push_back(o1.first->first);   // id -> 名字，供树输出用
+		grp[map_obj_grp.size() - 1].n_members = 1;
+		object_names.push_back(o1.first->first);   // id -> 名字，供输出用
 	}
 
 	pair<obj_id_map::iterator, bool> o2 =
@@ -468,7 +468,7 @@ void init_add_edge(string obj1, string obj2, double sim) {
 	if (o2.second) {
 		grp.resize(map_obj_grp.size());
 		grp[map_obj_grp.size() - 1].sim = 0;
-		grp[map_obj_grp.size() - 1].objs.push_back(o2.first->first);
+		grp[map_obj_grp.size() - 1].n_members = 1;
 		object_names.push_back(o2.first->first);
 	}
 
@@ -490,8 +490,8 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 	//“左向量”的长度，由于把两个组合并过程中该向量长度会改变，用dim1_size记录合并前的长度，不能用vec_dim1.size()
 	size_t dim1_size = vec_dim1.size();
 	//聚合之前group1和group2两组的对象个数
-	size_t group1_size = grp[group1].objs.size();
-	size_t group2_size = grp[group2].objs.size();
+	size_t group1_size = grp[group1].n_members;
+	size_t group2_size = grp[group2].n_members;
 	//”分组向量“的长度
 	size_t grp_size = grp.size();
 
@@ -584,10 +584,7 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 	//”分组向量“扩容
 	grp.resize(new_grp + 1);
 	//扩容后的空间先存入group1内所有对象
-	grp[new_grp].objs = grp[group1].objs;
-	//再存入group2内所有对象（append）
-	grp[new_grp].objs.insert(grp[new_grp].objs.end(), 
-		grp[group2].objs.begin(), grp[group2].objs.end());
+	grp[new_grp].n_members = group1_size + group2_size;
 	if (0 == LINKAGE_MTD)
 		grp[new_grp].sim = (grp[group1].sim * group1_size * (group1_size - 1)
 			+ grp[group2].sim * group2_size * (group2_size - 1) + group1_size * group2_size * max_sim * 2) 
@@ -598,9 +595,9 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 		grp[new_grp].sim = min(min(grp[group1].sim, grp[group2].sim), max_sim);
 
 	//清除group1和group2两组内的对象
-	grp[group1].objs.clear();
+	grp[group1].n_members = 0;
 	grp[group1].sim = 0;
-	grp[group2].objs.clear();
+	grp[group2].n_members = 0;
 	grp[group2].sim = 0;
 
 	//定位(group1, group2, ...)这个点
@@ -819,6 +816,10 @@ void clust_grp(double floor) {
 	//初始组（对象）数 = 树的叶子数
 	n_objects = grp.size();
 
+	//读入阶段结束后"名称 -> id"的映射就再也用不到了（输出走 object_names），
+	//把它占的内存还回去 —— n=200k / 1M 边实测峰值少约 7 MB。
+	obj_id_map().swap(map_obj_grp);
+
 	if (1 == LINKAGE_MTD) {
 		//单链接：边按相似度降序 + 并查集，O(m log m)
 		clust_kruskal(floor);
@@ -855,7 +856,7 @@ void clust_grp(double floor) {
 		rec.right = (uint32_t)group2;
 		rec.sim = max_sim;
 		rec.cohesion = grp[new_grp].sim;
-		rec.size = grp[new_grp].objs.size();
+		rec.size = grp[new_grp].n_members;
 		merges.push_back(rec);
 
 		if (DEBUG >= 2)
