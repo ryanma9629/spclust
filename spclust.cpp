@@ -357,6 +357,94 @@ uint32_t get_unit(size_t group1, size_t group2) {
 	return unit;
 }
 
+// ---------------------------------------------------------------------------
+// 单链接（LINKAGE_MTD == 1）走 Kruskal，完全不建稀疏结构。
+//
+// 单链接的簇间相似度 = 两个簇之间所有**原始边**的最大值（max 不稀释），
+// 所以整棵合并树等价于"把边按相似度降序排序，再用并查集逐个合并"（Kruskal / MST）。
+//
+// 这避开了原本的稠密化：max 不稀释 => 簇级相似度图会变成原图的**传递闭包**，
+// n=40000 / 400k 边实测要建 93,418,345 个单元（是边数的 234 倍），7.35 s。
+// Kruskal 只用 m 条边加一次排序。
+//
+// 并列（相似度相同的多条边）下合并**顺序**可能与贪心实现不同，但单链接在两个实现里
+// 都等于"只保留 sim >= X 的边之后各连通分量"，与顺序无关；所以任何阈值处切出来的
+// 分组、以及每个簇的紧致度（簇内最大边）都完全一致。
+// ---------------------------------------------------------------------------
+struct krusk_edge {
+	uint32_t a;
+	uint32_t b;
+	double sim;
+};
+
+static vector<krusk_edge> krusk_edges;
+static vector<uint32_t> krusk_parent;
+
+static bool krusk_order(const krusk_edge& x, const krusk_edge& y) {
+	if (x.sim != y.sim)
+		return x.sim > y.sim;      // 相似度降序
+	if (x.a != y.a)
+		return x.a < y.a;          // 并列时按 id 定序，只为了确定性
+	return x.b < y.b;
+}
+
+static uint32_t krusk_find(uint32_t x) {
+	while (krusk_parent[x] != x) {
+		krusk_parent[x] = krusk_parent[krusk_parent[x]];   // 路径减半
+		x = krusk_parent[x];
+	}
+	return x;
+}
+
+void clust_kruskal(double floor) {
+	sort(krusk_edges.begin(), krusk_edges.end(), krusk_order);
+
+	const size_t n = n_objects;
+	//集合的代表就是"代表这个簇的节点 id"：初始是对象自己，每次合并产生 n+i
+	krusk_parent.resize(n);
+	for (size_t i = 0; i < n; i++)
+		krusk_parent[i] = (uint32_t)i;
+	vector<size_t> size_of(n, 1);
+	vector<double> cohesion_of(n, 0.0);
+
+	size_t next_id = n;
+	for (size_t i = 0; i < krusk_edges.size(); i++) {
+		const krusk_edge& e = krusk_edges[i];
+		if (e.sim < floor || !(e.sim > 0))
+			break;                  // 到 floor 了（或没有正相似度的边了）
+		uint32_t ra = krusk_find(e.a);
+		uint32_t rb = krusk_find(e.b);
+		if (ra == rb)
+			continue;               // 已经在同一个簇里（重复边或成环）
+
+		uint32_t node = (uint32_t)next_id++;
+		merge_rec rec;
+		rec.left = ra;
+		rec.right = rb;
+		rec.sim = e.sim;
+		//紧致度 = 簇内最大边 = 原来的 max(max(g1,g2), max_sim)
+		rec.cohesion = max(max(cohesion_of[ra], cohesion_of[rb]), e.sim);
+		rec.size = size_of[ra] + size_of[rb];
+		merges.push_back(rec);
+
+		//喂给测试 runner 的合并日志（格式与贪心路径一致）
+		if (DEBUG >= 2)
+			cout << "\tGroup " << ra << " and group " << rb <<
+				" are merged into group " << node << " (sim=" << setprecision(12)
+				<< e.sim << ")." << endl;
+
+		//两个集合的代表都指向新节点
+		krusk_parent[ra] = node;
+		krusk_parent[rb] = node;
+		krusk_parent.push_back(node);
+		cohesion_of.push_back(rec.cohesion);
+		size_of.push_back(rec.size);
+
+		if (DEBUG >= 1 && 0 == merges.size() % DEBUG_FREQ_CLUST)
+			cout << "\t" << merges.size() << " merges, sim=" << e.sim << "." << endl;
+	}
+}
+
 //把一条边加入结构。原来叫 init_grp()：先把全部边读进 vector<sp_sim> sims，
 //再在这里遍历。现在由 readdb 边读边回调，那份 O(边数) 的缓存直接不存在了
 //（实测 1M 条边、长对象名时可省 169 MB 峰值内存）。
@@ -384,8 +472,17 @@ void init_add_edge(string obj1, string obj2, double sim) {
 		object_names.push_back(o2.first->first);
 	}
 
-	//把组信息而不是对象信息加入全局结构
-	add_grp(o1.first->second, o2.first->second, sim);
+	if (1 == LINKAGE_MTD) {
+		//单链接不需要稀疏结构，只攒边表（后面走 Kruskal）。这一支是编译期常量，
+		//所以 add_grp 那条路根本不会被执行到。
+		krusk_edge e;
+		e.a = (uint32_t)o1.first->second;
+		e.b = (uint32_t)o2.first->second;
+		e.sim = sim;
+		krusk_edges.push_back(e);
+	} else
+		//把组信息而不是对象信息加入全局结构
+		add_grp(o1.first->second, o2.first->second, sim);
 }
 
 //将group1和group2两组聚合，形成新组grp_k，更新其它组到grp_k的相似度
@@ -692,6 +789,10 @@ void free_mem(void) {
 	updated.clear();
 	dirty_max.clear();
 	touched.clear();
+	krusk_edges.clear();
+	vector<krusk_edge>().swap(krusk_edges);
+	krusk_parent.clear();
+	vector<uint32_t>().swap(krusk_parent);
 	heap.clear();
 	row_version.clear();
 	row_live.clear();
@@ -717,6 +818,17 @@ void clust_grp(double floor) {
 
 	//初始组（对象）数 = 树的叶子数
 	n_objects = grp.size();
+
+	if (1 == LINKAGE_MTD) {
+		//单链接：边按相似度降序 + 并查集，O(m log m)
+		clust_kruskal(floor);
+		free_mem();
+		e_time = clock();
+		if (DEBUG >= 1)
+			cout << "Done. (" << (double)(e_time - s_time) / CLOCKS_PER_SEC << "s)" << endl << endl;
+		return;
+	}
+
 	size_t grp_size = grp.size();
 	//合并到最大相似度 < floor 为止。floor 由调用方给：
 	//  floor = 切树阈值  -> 成本与"直接在阈值处停下"完全一样（默认就是这样）
