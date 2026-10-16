@@ -144,7 +144,10 @@ static bool mark_dirty_max(size_t x) {
 	return fresh;
 }
 //将对象名称映射到初始组
-map<string, size_t> map_obj_grp;
+//用 unordered_map 而不是 map：这一步是按名称找对象，不需要有序，只需要快。
+//实测（800k 边 / 8 万对象的采样画像）字符串查找是初始化段的主要开销。
+typedef unordered_map<string, size_t> obj_id_map;
+obj_id_map map_obj_grp;
 extern vector<sp_sim> sims;
 extern vector<grp_s> grp;
 
@@ -243,27 +246,31 @@ sp_unit* get_unit(size_t group1, size_t group2) {
 
 size_t init_grp(void) {
 	//把每个对象映射为初始组号
+	//每条边原来是 4 次查找（find(obj1) + find(obj2) + op[](obj1) + op[](obj2)），
+	//每次都要做字符串比较。改用 insert 一次拿到迭代器：每条边 2 次查找，
+	//而且哈希命中时不需要字符串比较。id 仍然是"首次出现顺序"，所以结果不变。
 	for (size_t i = 0; i < sims.size(); i++) {
 		//obj1是否尚未被映射？
-		if ( map_obj_grp.end() == map_obj_grp.find(sims[i].obj1)) {
-			//映射为当前最大的组号+1
+		pair<obj_id_map::iterator, bool> o1 =
 			map_obj_grp.insert(pair<string, size_t>(sims[i].obj1, map_obj_grp.size()));
-			//”分组向量“扩容
+		if (o1.second) {
+			//映射为当前最大的组号+1（就是插入前的 size()），并让”分组向量“记录obj1自成的新组
 			grp.resize(map_obj_grp.size());
-			//”分组向量“记录obj1自成的新组
 			grp[map_obj_grp.size() - 1].sim = 0;
 			grp[map_obj_grp.size() - 1].objs.push_back(sims[i].obj1);
 		}
 
 		//obj2是否尚未被映射？
-		if (map_obj_grp.end() == map_obj_grp.find(sims[i].obj2)) {
+		pair<obj_id_map::iterator, bool> o2 =
 			map_obj_grp.insert(pair<string, size_t>(sims[i].obj2, map_obj_grp.size()));
+		if (o2.second) {
 			grp.resize(map_obj_grp.size());
 			grp[map_obj_grp.size() - 1].sim = 0;
 			grp[map_obj_grp.size() - 1].objs.push_back(sims[i].obj2);
 		}
+
 		//把组信息而不是对象信息加入全局结构
-		add_grp(map_obj_grp[sims[i].obj1], map_obj_grp[sims[i].obj2], sims[i].sim);
+		add_grp(o1.first->second, o2.first->second, sims[i].sim);
 	}
 
 	//堆是在 add_grp 里顺带维护的，这里不需要再单独建堆
@@ -570,7 +577,7 @@ void clust_grp(void) {
 	init_grp();
 	clock_t e_time = clock();
 	if (DEBUG >= 1)
-		cout << "Done. (" << (e_time - s_time) / CLOCKS_PER_SEC << "s)" << endl << endl;
+		cout << "Done. (" << (double)(e_time - s_time) / CLOCKS_PER_SEC << "s)" << endl << endl;
 
 	s_time = clock();
 	if (DEBUG >= 1)
@@ -603,5 +610,5 @@ void clust_grp(void) {
 
 	e_time = clock();
 	if (DEBUG >= 1)
-		cout << "Done. (" << (e_time - s_time) / CLOCKS_PER_SEC << "s)" << endl << endl;
+		cout << "Done. (" << (double)(e_time - s_time) / CLOCKS_PER_SEC << "s)" << endl << endl;
 }

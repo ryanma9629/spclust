@@ -163,7 +163,7 @@ size_t readdb(const char* path) {
 		cout << "Done. (" << sims.size() << " edges";
 		if (n_skip > 0)
 			cout << ", " << n_skip << " line(s) skipped";
-		cout << ", " << (e_time - s_time) / CLOCKS_PER_SEC << "s)" << endl << endl;
+		cout << ", " << (double)(e_time - s_time) / CLOCKS_PER_SEC << "s)" << endl << endl;
 	}
 
 	return sims.size();
