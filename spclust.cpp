@@ -10,10 +10,57 @@ vector<p_dim2> vec_dim2;
 // 但旧实现为此要扫描整个索引空间三次（两趟更新 + 一趟 max 修复）：实测这三次
 // O(n) 全量扫描占了聚类段约 75% 的时间，而且每次合并还要新分配 3 个 O(n) 向量。
 // 下面这几个缓冲跨合并复用，只复位本次触及过的位置，于是每步都是 O(degree)。
-static vector<unsigned char> mark_flags;  // 位0 = 需要重算相似度；位1 = max 指针失效
+static vector<unsigned char> mark_flags;  // 位0=要重算相似度, 位1=max失效, 位2/位3=已记下对 group1/group2 的相似度
 static vector<size_t> updated;            // 需要重算相似度的下标（行号或列号）
 static vector<size_t> dirty_max;          // max 指针失效、需要重扫的行
 static vector<size_t> touched;            // 本次置过位的位置，用于 O(k) 复位
+
+//本次合并中，下标 x 到 group1 / group2 的相似度。相似度非负（读取端限制 [0,65535]），
+//所以 -1 可以安全地表示"没有这条边"。
+//
+//为什么要缓存这两个值：更新每个下标原本要调两次 get_unit()，而 get_unit() 是沿链线性查找，
+//实测占整个程序约一半时间。但这两条边本来就在我们已经遍历的那 4 条链上 ——
+//对下标 x，S(x, group1) 这个单元在 x > group1 时位于"行 group1"链上，
+//x < group1 时位于"列 group1"链上；对 group2 同理。收集阶段顺手记下来，更新阶段就
+//完全不需要 get_unit() 了。代价是两张 O(组数) 的 double 表，且只复位本次触及过的位置。
+static vector<double> sim_g1;
+static vector<double> sim_g2;
+
+enum { F_UPDATED = 1, F_DIRTY_MAX = 2, F_SIM_G1 = 4, F_SIM_G2 = 8 };
+
+//给下标 x 置一位；返回 true 表示这一位本次第一次置上
+static bool set_flag(size_t x, unsigned char bit) {
+	if (x >= mark_flags.size()) {
+		mark_flags.resize(x + 1, 0);
+		sim_g1.resize(x + 1, -1.0);
+		sim_g2.resize(x + 1, -1.0);
+	}
+	if (0 == mark_flags[x])
+		touched.push_back(x);          // 登记以便本次结束时 O(k) 复位
+	bool fresh = (0 == (mark_flags[x] & bit));
+	mark_flags[x] |= bit;
+	return fresh;
+}
+
+//标记下标 x “需要重算相似度”；返回 true 表示这是本次第一次标记（顺带去重）
+static bool mark_updated(size_t x) { return set_flag(x, F_UPDATED); }
+
+//标记下标 x 的 max 指针失效
+static bool mark_dirty_max(size_t x) { return set_flag(x, F_DIRTY_MAX); }
+
+//记录下标 x 到 group1 / group2 的相似度。**首次写入生效**：get_unit() 是沿链从头部
+//（add_grp 头插，即最后插入的单元）找第一个匹配，首次写入对应同一个单元，
+//所以重复 pair 的输入下行为也保持一致。
+static void record_sim_g1(size_t x, double v) {
+	set_flag(x, F_SIM_G1);
+	if (sim_g1[x] < 0)
+		sim_g1[x] = v;
+}
+static void record_sim_g2(size_t x, double v) {
+	set_flag(x, F_SIM_G2);
+	if (sim_g2[x] < 0)
+		sim_g2[x] = v;
+}
 
 // ---------------------------------------------------------------------------
 // 全局最大相似度：最大堆 + 版本号懒删除。
@@ -122,27 +169,6 @@ static void note_row_changed(size_t row) {
 	}
 }
 
-//标记下标 x “需要重算相似度”；返回 true 表示这是本次第一次标记（顺带去重）
-static bool mark_updated(size_t x) {
-	if (x >= mark_flags.size())
-		mark_flags.resize(x + 1, 0);
-	if (0 == mark_flags[x])
-		touched.push_back(x);
-	bool fresh = (0 == (mark_flags[x] & 1));
-	mark_flags[x] |= 1;
-	return fresh;
-}
-
-//标记下标 x 的 max 指针失效
-static bool mark_dirty_max(size_t x) {
-	if (x >= mark_flags.size())
-		mark_flags.resize(x + 1, 0);
-	if (0 == mark_flags[x])
-		touched.push_back(x);
-	bool fresh = (0 == (mark_flags[x] & 2));
-	mark_flags[x] |= 2;
-	return fresh;
-}
 //将对象名称映射到初始组
 //用 unordered_map 而不是 map：这一步是按名称找对象，不需要有序，只需要快。
 //实测（800k 边 / 8 万对象的采样画像）字符串查找是初始化段的主要开销。
@@ -292,8 +318,11 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 	//所有形如(group1, ..., ...)链上节点所在的列都需要更新
 	sp_unit* unit = vec_dim1[group1].head;
 	while (NULL != unit) {
-		if (group2 != unit->group2 && mark_updated(unit->group2))
-			updated.push_back(unit->group2);
+		if (group2 != unit->group2) {
+			record_sim_g1(unit->group2, unit->sim);   // 单元(group1,x) 就是 S(x,group1)
+			if (mark_updated(unit->group2))
+				updated.push_back(unit->group2);
+		}
 		unit = unit->right;
 	}
 
@@ -301,6 +330,7 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 	if (dim1_size > group2) {
 		unit = vec_dim1[group2].head;
 		while (NULL != unit) {
+			record_sim_g2(unit->group2, unit->sim);   // 单元(group2,x) 就是 S(x,group2)
 			if (mark_updated(unit->group2))
 				updated.push_back(unit->group2);
 			unit = unit->right;
@@ -310,6 +340,7 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 	//所有形如(..., group1, ...)链上节点所在的行都需要更新
 	unit = vec_dim2[group1].head;
 	while (NULL != unit) {
+		record_sim_g1(unit->group1, unit->sim);       // 单元(x,group1) 就是 S(x,group1)
 		if (mark_updated(unit->group1))
 			updated.push_back(unit->group1);
 		if (unit == vec_dim1[unit->group1].max && mark_dirty_max(unit->group1))
@@ -321,6 +352,7 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 	unit = vec_dim2[group2].head;
 	while (NULL != unit) {
 		if (group1 != unit->group1) {
+			record_sim_g2(unit->group1, unit->sim);   // 单元(x,group2) 就是 S(x,group2)
 			if (mark_updated(unit->group1))
 				updated.push_back(unit->group1);
 			if (unit == vec_dim1[unit->group1].max && mark_dirty_max(unit->group1))
@@ -339,12 +371,10 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 	//合并成一趟后这些重复单元不再产生（用例 20_overlap_update.csv 就是这个配置）。
 	for (size_t k = 0; k < updated.size(); k++) {
 		size_t i = updated[k];
-		//获得(i, group1, sim)这个节点的相似度，节点有可能不存在
-		unit = get_unit(i, group1);
-		double sim1 = (NULL != unit) ? unit->sim : 0;
-		//获得(i, group2, sim)这个节点的相似度，节点有可能不存在
-		unit = get_unit(i, group2);
-		double sim2 = (NULL != unit) ? unit->sim : 0;
+		//收集阶段已经把这 4 条链上的值顺手记下来了，这里直接读，不再做 get_unit() 的线性查找。
+		//-1 表示没有这条边，等价于原来的 get_unit 返回 NULL -> 0。
+		double sim1 = (sim_g1[i] < 0) ? 0 : sim_g1[i];
+		double sim2 = (sim_g2[i] < 0) ? 0 : sim_g2[i];
 
 		//Average Linkage
 		if (0 == LINKAGE_MTD) {
@@ -525,9 +555,12 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 		note_row_changed(i);
 	}
 
-	//复位本次触及过的标记。缓冲跨合并复用，所以这里既不再分配、也不清零整个 O(n) 内存。
-	for (size_t k = 0; k < touched.size(); k++)
+	//复位本次触及过的标记与缓存值。缓冲跨合并复用，所以这里既不再分配、也不清零整个 O(n) 内存。
+	for (size_t k = 0; k < touched.size(); k++) {
 		mark_flags[touched[k]] = 0;
+		sim_g1[touched[k]] = -1.0;
+		sim_g2[touched[k]] = -1.0;
+	}
 	touched.clear();
 	updated.clear();
 	dirty_max.clear();
@@ -559,6 +592,8 @@ void free_mem(void) {
 
 	//合并过程中复用的缓冲也一并释放
 	mark_flags.clear();
+	sim_g1.clear();
+	sim_g2.clear();
 	updated.clear();
 	dirty_max.clear();
 	touched.clear();
