@@ -72,29 +72,37 @@
 
 using namespace std;
 
-//聚类过程中保存相似性的节点
+//聚类过程中保存相似性的节点。
+//
+//四个链接和两个组号都存**下标**而不是指针，整个池是一块连续内存：
+//   sizeof(sp_unit) = 4*4(链接) + 2*4(组号) + 8(sim) = 32 字节（原来 48）
+//下标 0 保留为空哨兵（见 SP_NONE）。
+//实测节点尺寸是一阶因素（把节点人为撑到 128 字节会慢 1.17x），所以这一压是值得的。
+//
+//组号范围是 [0, 2*对象数)，链接下标范围是 [0, 单元数)，两者 uint32 都够；
+//代价是对象数上限约 21 亿 —— 到那个量级地址空间会先耗尽。
+//空链接用 0。0 号节点是**保留的空哨兵**，不参与任何链表 ——
+//这样 vec_dim1/vec_dim2 resize 时的值初始化（清零）天然就是"空"，
+//与原来 head/max 是裸指针时零初始化即 NULL 的行为一致。
+static const uint32_t SP_NONE = 0;
+
 struct sp_unit {
-	sp_unit *right;
-	sp_unit *down;
-	sp_unit *left;
-	sp_unit *up;
-	//组号范围是 [0, 2*对象数)，uint32 足够，而且把节点从 56 字节压到 48 字节。
-	//实测：峰值内存 -16%（2M 边 223 -> 188 MB），时间无可测变化。
-	//代价是对象数上限约 21 亿 —— 到那个量级地址空间会先耗尽。
-	//注意：这里不值得为了省更多内存去做“指针改下标”的大重构 ——
-	//把节点人为放大到 128 字节（2.3 倍）实测也只慢 6~7%，说明尺寸是二阶因素。
+	uint32_t right;
+	uint32_t down;
+	uint32_t left;
+	uint32_t up;
 	uint32_t group1;
 	uint32_t group2;
 	double sim;
 };
 //“左向量”中的元素
 struct p_dim1 {
-	sp_unit *head;
-	sp_unit *max;
+	uint32_t head;
+	uint32_t max;
 };
 //"顶向量“中的元素
 struct p_dim2 {
-	sp_unit *head;
+	uint32_t head;
 };
 //聚类结果的元素，组内相似性+成员列表
 struct grp_s {
