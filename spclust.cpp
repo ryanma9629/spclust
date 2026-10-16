@@ -15,6 +15,113 @@ static vector<size_t> updated;            // 需要重算相似度的下标（�
 static vector<size_t> dirty_max;          // max 指针失效、需要重扫的行
 static vector<size_t> touched;            // 本次置过位的位置，用于 O(k) 复位
 
+// ---------------------------------------------------------------------------
+// 全局最大相似度：最大堆 + 版本号懒删除。
+//
+// P0-1 之后 get_max() 那次 O(组数) 扫描已经是聚类段 57~78% 的时间，换成堆后是 O(1)。
+//
+// 关键设计：**把 key 冻结在堆项里**（sim 存进项里，不实时去 vec_dim1[row].max 读）。
+// 这一点是必须的：如果 key 实时读，一次合并里改掉 k 行的 key 之后，堆数组的次序就
+// 与当前 key 不再对应，堆序被破坏；而 sift_up/sift_down 都假定“除待修的那一处之外
+// 处处是有效堆”，所以逐个就地 sift 并不能把它修回来（这一点是实测踩出来的）。
+//
+// 行内 max 变化时就推进该行版本号并压入新项，旧项靠版本号作废。带来的好处：
+//   * 不需要任何“项在堆里的位置”簿记，也不需要让更新幂等
+//   * 不依赖调用顺序，可以在 add_grp / 摘除 / max 重扫处就地维护
+//   * 堆操作完全不碰 vec_dim1，所以合并中途那些暂时悬垂的 max 指针与堆无关
+// 作废项堆积超过活行数的若干倍时重建一次（每个活行只留一项），内存仍是 O(n)，
+// 并且重建只按堆自身大小做，摊还 O(1)。
+// ---------------------------------------------------------------------------
+struct SimEntry {
+	double sim;
+	size_t row;
+	size_t version;
+};
+
+static vector<SimEntry> heap;
+static vector<size_t> row_version;   // 每行的当前版本号
+static vector<char> row_live;        // 该行当前是否非空（用于控制重建阈值）
+static size_t live_rows = 0;
+
+//堆序：先比相似度，相等时行号小的算“更大”。
+//这与旧实现“i 升序扫描、只在严格大于当前最大值时接管”的并列行为一致。
+static bool entry_less(const SimEntry& a, const SimEntry& b) {
+	if (a.sim != b.sim)
+		return a.sim < b.sim;
+	return a.row > b.row;
+}
+
+static void heap_swap(size_t i, size_t j) {
+	SimEntry tmp = heap[i];
+	heap[i] = heap[j];
+	heap[j] = tmp;
+}
+
+static void heap_sift_up(size_t i) {
+	while (i > 0) {
+		size_t parent = (i - 1) / 2;
+		if (!entry_less(heap[parent], heap[i]))
+			break;
+		heap_swap(parent, i);
+		i = parent;
+	}
+}
+
+static void heap_sift_down(size_t i) {
+	size_t n = heap.size();
+	while (true) {
+		size_t left = 2 * i + 1, right = left + 1, top = i;
+		if (left < n && entry_less(heap[top], heap[left]))
+			top = left;
+		if (right < n && entry_less(heap[top], heap[right]))
+			top = right;
+		if (top == i)
+			break;
+		heap_swap(i, top);
+		i = top;
+	}
+}
+
+//行 row 的 max 变了（也可能变成空）：推进版本号；非空则压入新项。
+//**每一处写 vec_dim1[*].max 的地方都必须调用它**，否则那一行会被漏掉。
+static void note_row_changed(size_t row) {
+	if (row >= row_version.size()) {
+		row_version.resize(row + 1, 0);
+		row_live.resize(row + 1, 0);
+	}
+	row_version[row]++;
+
+	bool live = (NULL != vec_dim1[row].max);
+	if (live != (0 != row_live[row])) {
+		row_live[row] = live ? 1 : 0;
+		live_rows += live ? 1 : -1;
+	}
+	if (!live)
+		return;                      // 变空：只让旧项作废
+
+	SimEntry e;
+	e.sim = vec_dim1[row].max->sim;
+	e.row = row;
+	e.version = row_version[row];
+	heap.push_back(e);
+	heap_sift_up(heap.size() - 1);
+
+	//作废项堆得太多就重建：只保留每个活行的当前项，然后 Floyd 建堆。
+	//重建代价按堆自身大小算，所以相对压入次数是摊还 O(1)，内存也稳定在 O(活行数)。
+	if (heap.size() > 4 * live_rows + 64) {
+		vector<SimEntry> fresh;
+		fresh.reserve(heap.size());
+		for (size_t i = 0; i < heap.size(); i++) {
+			const SimEntry& e2 = heap[i];
+			if (e2.row < row_version.size() && e2.version == row_version[e2.row])
+				fresh.push_back(e2);
+		}
+		heap.swap(fresh);
+		for (size_t i = heap.size() / 2; i-- > 0; )
+			heap_sift_down(i);
+	}
+}
+
 //标记下标 x “需要重算相似度”；返回 true 表示这是本次第一次标记（顺带去重）
 static bool mark_updated(size_t x) {
 	if (x >= mark_flags.size())
@@ -68,8 +175,10 @@ sp_unit* add_grp(size_t group1, size_t group2, double sim) {
 	unit->down = NULL;
 
 	//如果该行的max不存在或者比待加入的节点小，更新”左向量“的max指针
-	if (NULL == vec_dim1[group1].max || vec_dim1[group1].max->sim < sim)
+	if (NULL == vec_dim1[group1].max || vec_dim1[group1].max->sim < sim) {
 		vec_dim1[group1].max = unit;
+		note_row_changed(group1);
+	}
 
 	//原来的横向链表头
 	sp_unit* prev_head = vec_dim1[group1].head;
@@ -91,21 +200,25 @@ sp_unit* add_grp(size_t group1, size_t group2, double sim) {
 	return unit;
 }
 
-//获取全局结构中值最大的节点
+//获取全局结构中值最大的节点（堆顶，摊还 O(1)）
 sp_unit* get_max(void) {
-	double max = 0;
-	sp_unit* unit = NULL;
-	//沿着”左向量“遍历每一行链表，每行最大值节点的指针已经记录在max中
-	for (size_t i = 0; i < vec_dim1.size(); i++) {
-		//这一行链表可能已经在聚合过程中被删除，需判断
-		if (NULL == vec_dim1[i].max)
-			continue;
-		//不断更新当前找到的最大值
-		else if (vec_dim1[i].max->sim > max) {
-			unit = vec_dim1[i].max;
-			max = unit->sim;
-		}
+	//丢掉被版本号作废的堆顶
+	while (!heap.empty()) {
+		const SimEntry& e = heap[0];
+		if (e.row < row_version.size() && e.version == row_version[e.row])
+			break;
+		heap[0] = heap.back();
+		heap.pop_back();
+		if (!heap.empty())
+			heap_sift_down(0);
 	}
+	if (heap.empty())
+		return NULL;
+	sp_unit* unit = vec_dim1[heap[0].row].max;
+	//与原实现一致：相似度为 0 不算候选（原实现用 max 初值 0 + 严格 > 来筛）。
+	//堆里放着所有非空行，所以堆顶 <= 0 就意味着不存在正相似度的候选。
+	if (NULL == unit || !(unit->sim > 0))
+		return NULL;
 	return unit;
 }
 
@@ -152,6 +265,8 @@ size_t init_grp(void) {
 		//把组信息而不是对象信息加入全局结构
 		add_grp(map_obj_grp[sims[i].obj1], map_obj_grp[sims[i].obj2], sims[i].sim);
 	}
+
+	//堆是在 add_grp 里顺带维护的，这里不需要再单独建堆
 	return grp.size();
 }
 
@@ -373,9 +488,11 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 	//”左向量“中删除下标为group1,group2（如果存在）指针
 	vec_dim1[group1].head = NULL;
 	vec_dim1[group1].max = NULL;
+	note_row_changed(group1);
 	if (dim1_size > group2) {
 		vec_dim1[group2].head = NULL;
 		vec_dim1[group2].max = NULL;
+		note_row_changed(group2);
 	}
 	//”顶向量“中删除下标为group1,group2的指针
 	vec_dim2[group1].head = NULL;
@@ -398,6 +515,7 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 		//下一次 get_max() 就是 heap-use-after-free（见 tests/cases/22_zero_row_max.csv）。
 		//best 仍是“从左到右第一个取得最大值的单元”，并列行为与旧写法一致。
 		vec_dim1[i].max = best;
+		note_row_changed(i);
 	}
 
 	//复位本次触及过的标记。缓冲跨合并复用，所以这里既不再分配、也不清零整个 O(n) 内存。
@@ -437,6 +555,10 @@ void free_mem(void) {
 	updated.clear();
 	dirty_max.clear();
 	touched.clear();
+	heap.clear();
+	row_version.clear();
+	row_live.clear();
+	live_rows = 0;
 }
 
 //聚类主过程
