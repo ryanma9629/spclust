@@ -44,6 +44,13 @@ TOL_RSS = 1.15
 FATAL_TIME = 3.0
 FATAL_RSS = 2.0
 
+# 机器状态哨兵：bench_small 是固定输入的最快用例，把它当成"这台机器现在多快"的探针。
+# 开发过程中踩过一次：基线是在机器忙/热的时候记的，之后空闲时跑，所有用例都显示"快 2 倍"，
+# 看上去像大幅优化，其实是环境变了。反之（空闲时记、忙时跑）会全线误报"变慢"。
+# 所以哨兵偏差超过这个比例时，本次与基线的比较一律不作结论。
+CANARY_CASE = "bench_small"
+CANARY_TOL = 0.30
+
 # 每个用例跑几次（大的少跑几次，控制总时长）
 # 大的用例本身慢，重复次数只能少一些；但实测 7 次时 min 与中位的差能到 23%（机器上
 # 还有别的东西在跑），所以宁可多花几秒也要把最小值探到底。
@@ -213,6 +220,20 @@ def main():
         return 0
 
     print("-" * 78)
+
+    # 哨兵检查：机器状态和记基线时差太多的话，下面的比值都不作数
+    canary_ratio = None
+    for case, which, reps, row, flag in rows:
+        if case == CANARY_CASE and row[5]:
+            canary_ratio = row[5]
+    if canary_ratio is not None and abs(canary_ratio - 1.0) > CANARY_TOL:
+        # rt = 本次中位 / 基线中位；比值小于 1 说明耗时更少，也就是**更快**
+        direction = "快" if canary_ratio < 1 else "慢"
+        print(f"不作结论: 机器状态与记基线时明显不同 —— 哨兵用例 {CANARY_CASE} 本次{direction} "
+              f"{abs(canary_ratio - 1) * 100:.0f}%（{canary_ratio:.2f}x）。"
+              f"要么等机器空闲后重跑，要么用 `make bench-update` 重记基线。")
+        return 0
+
     if noisy:
         print(f"警告: {len(noisy)} 个用例噪声大（{', '.join(noisy)}）—— 这些数字不作为结论，"
               f"建议机器空闲时重跑")
@@ -221,6 +242,8 @@ def main():
         return 1
     print("结论: 与基线一致（超出容差的会标成『变慢』；只有超过 "
           f"{FATAL_TIME:.0f}x 时间 / {FATAL_RSS:.0f}x 内存才失败）")
+    if canary_ratio:
+        print(f"（哨兵 {CANARY_CASE} {canary_ratio:.2f}x，容差 ±{CANARY_TOL * 100:.0f}%）")
     return 0
 
 
