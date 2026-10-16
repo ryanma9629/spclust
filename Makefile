@@ -1,4 +1,4 @@
-# spclust —— macOS / POSIX 构建
+# spclust —— 构建
 #
 #   make            构建 ./spclust
 #   make run        构建并跑 sim.csv

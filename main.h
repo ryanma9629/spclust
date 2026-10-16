@@ -1,18 +1,6 @@
 #ifndef MAIN_H
 #define MAIN_H
 
-// ---------------------------------------------------------------------------
-// 平台相关头文件：只有 Windows 上的 ODBC 版本才需要。
-// macOS / Linux 走标准库，不需要任何东西。
-// ---------------------------------------------------------------------------
-#ifdef _WIN32
-#include <tchar.h>
-#include <windows.h>
-#include <sql.h>
-#include <sqltypes.h>
-#include <sqlext.h>
-#endif
-
 #include <cstdio>
 #include <cstdlib>
 #include <cstddef>

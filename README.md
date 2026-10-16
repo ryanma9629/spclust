@@ -281,28 +281,6 @@ make run MIN_SIM=0 LINKAGE=0                  # hmm，MIN_SIM=0 只改默认；�
 | `DEBUG_FREQ_READDB` | 10000 | 读数据的进度打印频度 |
 | `DEBUG_FREQ_CLUST` | 100 | 聚类进度打印频度（建议 >=100） |
 
-## 与上游原版的差异
-
-这份实现源自一个从数据库直读边表的版本（ODBC + `<windows.h>` + `_tmain`），只能在特定的
-编译环境里构建。现在的读取端是 CSV / 标准输入（见 `readdb.cpp`），`main.h` 里保留了
-`#ifdef _WIN32` 分支以便按需接回原来的 ODBC 读取路径。
-
-`spclust.cpp` 的核心改动是四件事：相似度精度（`unsigned short` → `double`）、`get_max` 的
-use-after-free、把每次合并的 4 趟 O(n) 全量扫描改成 O(degree)、把 `get_max` 换成最大堆
-（见「已修复」和「性能实测」）：
-
-| 文件 | 改动 |
-|---|---|
-| `main.h` | Windows/ODBC 头文件包进 `#ifdef _WIN32`；补齐标准库头文件；可调参数加 `#ifndef` 以便命令行覆盖 |
-| `main.cpp` | `_tmain(argc, _TCHAR* argv[])` → `main(argc, char* argv[])`；支持可选输入文件参数；打印结果（原来那段被注释掉了） |
-| `readdb.h` | 签名由 `readdb(void)` 改为 `readdb(const char* path, edge_handler)`（流式回调）；删掉 ODBC 专用的 `odbc_show_err` |
-| `readdb.cpp` | 整个 ODBC 读取换成 CSV / 标准输入读取，并改成"小批量流式"（不再缓存全部边）；不再有 `char obj1[32]` 的截断限制 |
-| `spclust.cpp` / `spclust.h` | 精度修复、`get_max` 的 UAF、增量下标遍历替代全量扫描、`get_max` 改版本号懒删除最大堆、`init_grp` 换 `unordered_map`、去掉 `get_unit` 的线性查找、链接改下标 + 32 字节节点池、记录合并树（`--cut`/`--tree`）、单链接走 Kruskal、min 链接的紧致度初值 |
-| `Makefile` / `sim.csv` / `.gitignore` | 新增 |
-| `tests/` | 新增：独立 oracle + 22 个边界用例 + 差分测试 runner |
-
-原来的 `readdb.cpp` 还在 git 历史里：`git show 9c1afc7:readdb.cpp`。
-
 ## 已修复
 
 ### `average` 的相似度曾用 `unsigned short` 存，每步截断一次，误差会累积
