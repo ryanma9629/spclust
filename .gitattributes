@@ -1,0 +1,8 @@
+# Language statistics should describe the product, not the test harness. The suites are large
+# (tests/*.py alone is ~2400 lines against the binding's ~570), which was enough to make
+# GitHub report Python as the primary language of a C++ library. The tests stay in the
+# repository and stay runnable; they just do not vote on the language badge.
+tests/** linguist-detectable=false
+
+# Sample data, likewise: it is input, not code.
+sim.csv linguist-detectable=false
