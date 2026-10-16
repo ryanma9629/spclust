@@ -77,8 +77,9 @@ int main(int argc, char* argv[]) {
 		return 2;
 	}
 
-	//无参数或 "-" 都表示从标准输入读取
-	readdb(argc > 1 ? argv[1] : NULL);
+	//无参数或 "-" 都表示从标准输入读取。
+	//边一边读一边就进结构了（不缓存整个输入），所以 init 阶段并进了这里。
+	readdb(argc > 1 ? argv[1] : NULL, &init_add_edge);
 
 	if (DEBUG >= 1) {
 		cout << "Linkage=" << linkage_name() << ", min_sim=" << MIN_SIM_CLUST << endl << endl;

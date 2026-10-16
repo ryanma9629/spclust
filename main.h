@@ -71,16 +71,6 @@
 
 using namespace std;
 
-//保存原始相似性的结构
-struct sp_sim {
-	string obj1;
-	string obj2;
-	double sim;
-};
-
-
-
-
 //聚类过程中保存相似性的节点
 struct sp_unit {
 	sp_unit *right;

@@ -1,5 +1,6 @@
 #include "spclust.h"
 #include "readdb.h"
+#include <utility>
 
 //“左向量”，记录每个横向链的头、值最大节点
 vector<p_dim1> vec_dim1;
@@ -174,7 +175,6 @@ static void note_row_changed(size_t row) {
 //实测（800k 边 / 8 万对象的采样画像）字符串查找是初始化段的主要开销。
 typedef unordered_map<string, size_t> obj_id_map;
 obj_id_map map_obj_grp;
-extern vector<sp_sim> sims;
 extern vector<grp_s> grp;
 
 //将一个(group1, group2, sim)的节点加入结构，每次加入所在链表的头位置
@@ -270,37 +270,33 @@ sp_unit* get_unit(size_t group1, size_t group2) {
 	return unit;
 }
 
-size_t init_grp(void) {
-	//把每个对象映射为初始组号
-	//每条边原来是 4 次查找（find(obj1) + find(obj2) + op[](obj1) + op[](obj2)），
-	//每次都要做字符串比较。改用 insert 一次拿到迭代器：每条边 2 次查找，
-	//而且哈希命中时不需要字符串比较。id 仍然是"首次出现顺序"，所以结果不变。
-	for (size_t i = 0; i < sims.size(); i++) {
-		//obj1是否尚未被映射？
-		pair<obj_id_map::iterator, bool> o1 =
-			map_obj_grp.insert(pair<string, size_t>(sims[i].obj1, map_obj_grp.size()));
-		if (o1.second) {
-			//映射为当前最大的组号+1（就是插入前的 size()），并让”分组向量“记录obj1自成的新组
-			grp.resize(map_obj_grp.size());
-			grp[map_obj_grp.size() - 1].sim = 0;
-			grp[map_obj_grp.size() - 1].objs.push_back(sims[i].obj1);
-		}
-
-		//obj2是否尚未被映射？
-		pair<obj_id_map::iterator, bool> o2 =
-			map_obj_grp.insert(pair<string, size_t>(sims[i].obj2, map_obj_grp.size()));
-		if (o2.second) {
-			grp.resize(map_obj_grp.size());
-			grp[map_obj_grp.size() - 1].sim = 0;
-			grp[map_obj_grp.size() - 1].objs.push_back(sims[i].obj2);
-		}
-
-		//把组信息而不是对象信息加入全局结构
-		add_grp(o1.first->second, o2.first->second, sims[i].sim);
+//把一条边加入结构。原来叫 init_grp()：先把全部边读进 vector<sp_sim> sims，
+//再在这里遍历。现在由 readdb 边读边回调，那份 O(边数) 的缓存直接不存在了
+//（实测 1M 条边、长对象名时可省 169 MB 峰值内存）。
+//obj1/obj2 是按值传进来的：readdb 把字符串 move 进参数，这里再 move 进 map，
+//全程零字符串拷贝（原来要先拷进 sims，再拷进 map，再拷进成员列表）。
+void init_add_edge(string obj1, string obj2, double sim) {
+	//每条边 2 次哈希查找（原来 4 次树查找），字符串只在哈希冲突时才比较。
+	//id 仍然是"首次出现顺序"，所以结果不变。
+	pair<obj_id_map::iterator, bool> o1 =
+		map_obj_grp.insert(pair<string, size_t>(std::move(obj1), map_obj_grp.size()));
+	if (o1.second) {
+		//映射为当前最大的组号+1（就是插入前的 size()），并让”分组向量“记录obj1自成的新组
+		grp.resize(map_obj_grp.size());
+		grp[map_obj_grp.size() - 1].sim = 0;
+		grp[map_obj_grp.size() - 1].objs.push_back(o1.first->first);
 	}
 
-	//堆是在 add_grp 里顺带维护的，这里不需要再单独建堆
-	return grp.size();
+	pair<obj_id_map::iterator, bool> o2 =
+		map_obj_grp.insert(pair<string, size_t>(std::move(obj2), map_obj_grp.size()));
+	if (o2.second) {
+		grp.resize(map_obj_grp.size());
+		grp[map_obj_grp.size() - 1].sim = 0;
+		grp[map_obj_grp.size() - 1].objs.push_back(o2.first->first);
+	}
+
+	//把组信息而不是对象信息加入全局结构
+	add_grp(o1.first->second, o2.first->second, sim);
 }
 
 //将group1和group2两组聚合，形成新组grp_k，更新其它组到grp_k的相似度
@@ -605,16 +601,9 @@ void free_mem(void) {
 
 //聚类主过程
 void clust_grp(void) {
+	//结构在 readdb 边读边回调时就已经建好了（见 init_add_edge），这里只剩聚类
 	clock_t s_time = clock();
-	if (DEBUG >= 1)
-		cout << "Initializing..." << endl;
-	//将相似度矩阵中的数值填入结构
-	init_grp();
-	clock_t e_time = clock();
-	if (DEBUG >= 1)
-		cout << "Done. (" << (double)(e_time - s_time) / CLOCKS_PER_SEC << "s)" << endl << endl;
-
-	s_time = clock();
+	clock_t e_time = 0;
 	if (DEBUG >= 1)
 		cout << "Clustering..." << endl;
 
