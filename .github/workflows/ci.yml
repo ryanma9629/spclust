@@ -15,16 +15,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Needed by the scipy interop and Python binding tests (both skip when absent)
-        run: python3 -m pip install --quiet --disable-pip-version-check numpy scipy
+      # numpy drives the Python binding tests and scipy the interop test; both skip
+      # themselves when absent. They go into a virtualenv because the runners' system
+      # Python is externally managed (PEP 668) and refuses a plain `pip install`.
+      # CMake is pointed at this interpreter as well, so the ctest entries use it too.
+      - name: Python dependencies (virtualenv)
+        run: |
+          python3 -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install numpy scipy
 
       - name: Configure
-        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+        run: >
+          cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+          -DPython3_EXECUTABLE=$PWD/.venv/bin/python
 
       - name: Build (library + CLI + tests)
         run: cmake --build build --parallel
 
-      - name: Test (cut properties + differential + CLI contract)
+      - name: Test (cut properties + differential + CLI + C API + scipy + Python binding)
         run: ctest --test-dir build --output-on-failure
 
       - name: The linkage must be a run-time choice (one binary, three different results)
@@ -39,6 +48,11 @@ jobs:
 
       - name: Sanitizers (ASan/UBSan over the case corpus)
         run: make asan-cases
+
+      - name: Python binding against the shared library, outside CMake
+        run: |
+          make lib-shared
+          PYTHONPATH=python .venv/bin/python tests/test_python.py --lib ./libspclust.so
 
       - name: Library-only build (proves no dependency on tools/ and that the options work)
         run: |
