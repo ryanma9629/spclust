@@ -250,6 +250,13 @@ int main(int argc, char* argv[]) {
 		} else if ("-h" == a || "--help" == a) {
 			usage(argv[0]);
 			return 0;
+		} else if (a.size() > 1 && '-' == a[0]) {
+			//以 - 开头、但不是单独一个 "-"（那是 stdin）的，都是不认识的选项。
+			//以前这里会把 --nope 当成文件名，于是报成"文件打不开"（退出码 1），
+			//把"用法错误"和"输入错误"混在一起了。
+			cerr << "未知选项: " << a << endl;
+			usage(argv[0]);
+			return 2;
 		} else if (NULL == path) {
 			path = argv[i];
 		} else {

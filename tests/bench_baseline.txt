@@ -1,0 +1,10 @@
+# spclust 性能基线：由 `python3 tests/bench.py --update` 生成
+# 只在 tests/gen_bench.py 的参数与机器都相同时才可比
+# 机器: Apple M5 / Darwin 27.0.0
+# 协议: 每用例重复 N 次，取中位；min/下四分位/中位差异 >15% 视为噪声大
+# 列: 用例 二进制 中位墙钟秒 峰值RSS_MB
+bench_small    spclust    0.0161 4.9
+bench_mid      spclust    0.1962 20.6
+bench_large    spclust    0.9136 47.9
+bench_lowval   spclust    0.0936 20.4
+bench_single   linkage1   0.2488 30.3
