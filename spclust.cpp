@@ -5,6 +5,37 @@
 vector<p_dim1> vec_dim1;
 //“顶向量”，记录每个纵向链的头
 vector<p_dim2> vec_dim2;
+
+// merge_grp 每次只需重算“与 group1/group2 相邻的那些行/列”，即 O(degree) 个下标，
+// 但旧实现为此要扫描整个索引空间三次（两趟更新 + 一趟 max 修复）：实测这三次
+// O(n) 全量扫描占了聚类段约 75% 的时间，而且每次合并还要新分配 3 个 O(n) 向量。
+// 下面这几个缓冲跨合并复用，只复位本次触及过的位置，于是每步都是 O(degree)。
+static vector<unsigned char> mark_flags;  // 位0 = 需要重算相似度；位1 = max 指针失效
+static vector<size_t> updated;            // 需要重算相似度的下标（行号或列号）
+static vector<size_t> dirty_max;          // max 指针失效、需要重扫的行
+static vector<size_t> touched;            // 本次置过位的位置，用于 O(k) 复位
+
+//标记下标 x “需要重算相似度”；返回 true 表示这是本次第一次标记（顺带去重）
+static bool mark_updated(size_t x) {
+	if (x >= mark_flags.size())
+		mark_flags.resize(x + 1, 0);
+	if (0 == mark_flags[x])
+		touched.push_back(x);
+	bool fresh = (0 == (mark_flags[x] & 1));
+	mark_flags[x] |= 1;
+	return fresh;
+}
+
+//标记下标 x 的 max 指针失效
+static bool mark_dirty_max(size_t x) {
+	if (x >= mark_flags.size())
+		mark_flags.resize(x + 1, 0);
+	if (0 == mark_flags[x])
+		touched.push_back(x);
+	bool fresh = (0 == (mark_flags[x] & 2));
+	mark_flags[x] |= 2;
+	return fresh;
+}
 //将对象名称映射到初始组
 map<string, size_t> map_obj_grp;
 extern vector<sp_sim> sims;
@@ -128,35 +159,28 @@ size_t init_grp(void) {
 size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 	//“左向量”的长度，由于把两个组合并过程中该向量长度会改变，用dim1_size记录合并前的长度，不能用vec_dim1.size()
 	size_t dim1_size = vec_dim1.size();
-	//"顶向量“的长度，由于把两个组合并过程中该向量长度会改变，用dim2_size记录合并前的长度，不能用vec_dim2.size()
-	size_t dim2_size = vec_dim2.size();
-
 	//聚合之前group1和group2两组的对象个数
 	size_t group1_size = grp[group1].objs.size();
 	size_t group2_size = grp[group2].objs.size();
 	//”分组向量“的长度
 	size_t grp_size = grp.size();
 
-	//标记”左向量“中需要更新的行
-	vector<size_t> update_dim1(dim1_size);
-	//标记”顶向量“中需要更新的列
-	vector<size_t> update_dim2(dim2_size);
-	//标记”左向量“中需要更新最大值的行
-	vector<size_t> update_max(dim1_size);
+	//收集需要重算相似度的行/列，以及 max 指针失效的行。只遍历被标记的下标。
 
 	//所有形如(group1, ..., ...)链上节点所在的列都需要更新
 	sp_unit* unit = vec_dim1[group1].head;
 	while (NULL != unit) {
-		if (group2 != unit->group2)
-			update_dim2[unit->group2] = 1;
+		if (group2 != unit->group2 && mark_updated(unit->group2))
+			updated.push_back(unit->group2);
 		unit = unit->right;
 	}
 
 	//所有形如(group2, ..., ...)链上节点所在的列都需要更新，如果该链存在
-	if (vec_dim1.size() > group2) {
+	if (dim1_size > group2) {
 		unit = vec_dim1[group2].head;
 		while (NULL != unit) {
-			update_dim2[unit->group2] = 1;
+			if (mark_updated(unit->group2))
+				updated.push_back(unit->group2);
 			unit = unit->right;
 		}
 	}
@@ -164,9 +188,10 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 	//所有形如(..., group1, ...)链上节点所在的行都需要更新
 	unit = vec_dim2[group1].head;
 	while (NULL != unit) {
-		update_dim1[unit->group1] = 1;
-		if (unit == vec_dim1[unit->group1].max)
-			update_max[unit->group1] = 1;
+		if (mark_updated(unit->group1))
+			updated.push_back(unit->group1);
+		if (unit == vec_dim1[unit->group1].max && mark_dirty_max(unit->group1))
+			dirty_max.push_back(unit->group1);
 		unit = unit->down;
 	}
 
@@ -174,57 +199,44 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 	unit = vec_dim2[group2].head;
 	while (NULL != unit) {
 		if (group1 != unit->group1) {
-			update_dim1[unit->group1] = 1;
-			if (unit == vec_dim1[unit->group1].max)
-				update_max[unit->group1] = 1;
+			if (mark_updated(unit->group1))
+				updated.push_back(unit->group1);
+			if (unit == vec_dim1[unit->group1].max && mark_dirty_max(unit->group1))
+				dirty_max.push_back(unit->group1);
 		}
 		unit = unit->down;
 	}
 
-	//沿着”左向量“遍历每个需要更新的行
-	for (size_t i = 0; i < dim1_size; i++) {
-		if (update_dim1[i]) {
-			//获得(i, group1, sim)这个节点的相似度，节点有可能不存在
-			unit = get_unit(i, group1);
-			double sim1 = (NULL != unit) ? unit->sim : 0;
-			//获得(i, group2, sim)这个节点的相似度，节点有可能不存在
-			unit = get_unit(i, group2);
-			double sim2 = (NULL != unit) ? unit->sim : 0;
+	//排成升序，保持与旧实现（两趟 for i = 0..dim 扫描标记）一致的处理顺序
+	sort(updated.begin(), updated.end());
 
-			//Average Linkage
-			if (0 == LINKAGE_MTD) {
-				double sim = (sim1 * group1_size + sim2 * group2_size) / 
-					(group1_size + group2_size);
-				if (sim > 0)
-					add_grp(i, grp_size, sim);
-			//Complete Linkage
-			} else if (1 == LINKAGE_MTD)
-				add_grp(i, grp_size, max(sim1, sim2));
-			//Single Linkage
-			else if (2 == LINKAGE_MTD)
-				if (min(sim1, sim2) > 0)
-					add_grp(i, grp_size, min(sim1, sim2));
-		}
-	}
+	//重算这些下标到新组的相似度。
+	//旧实现分“行”和“列”两趟遍历，两趟的循环体逐字相同：对同一个下标 x，
+	//都是 get_unit(x, group1) 和 get_unit(x, group2)。所以 x 同时落在两趟里时，
+	//旧实现会为同一个 (x, grp_size) 调用两次 add_grp、插入两个数值相同的重复单元。
+	//合并成一趟后这些重复单元不再产生（用例 20_overlap_update.csv 就是这个配置）。
+	for (size_t k = 0; k < updated.size(); k++) {
+		size_t i = updated[k];
+		//获得(i, group1, sim)这个节点的相似度，节点有可能不存在
+		unit = get_unit(i, group1);
+		double sim1 = (NULL != unit) ? unit->sim : 0;
+		//获得(i, group2, sim)这个节点的相似度，节点有可能不存在
+		unit = get_unit(i, group2);
+		double sim2 = (NULL != unit) ? unit->sim : 0;
 
-	//沿着顶向量遍历每个需要更新的列
-	for (size_t i = 0; i < dim2_size; i++) {
-		if (update_dim2[i]) {
-			unit = get_unit(i, group1);
-			double sim1 = (NULL != unit) ? unit->sim : 0;
-			unit = get_unit(i, group2);
-			double sim2 = (NULL != unit) ? unit->sim : 0;
-			if (0 == LINKAGE_MTD) {
-				double sim = (sim1 * group1_size + sim2 * group2_size) / 
-					(group1_size + group2_size);
-				if (sim > 0)
-					add_grp(i, grp_size, sim);
-			} else if (1 == LINKAGE_MTD)
-				add_grp(i, grp_size, max(sim1, sim2));
-			else if (2 == LINKAGE_MTD)
-				if (min(sim1, sim2) > 0)
-					add_grp(i, grp_size, min(sim1, sim2));
-		}
+		//Average Linkage
+		if (0 == LINKAGE_MTD) {
+			double sim = (sim1 * group1_size + sim2 * group2_size) / 
+				(group1_size + group2_size);
+			if (sim > 0)
+				add_grp(i, grp_size, sim);
+		//Complete Linkage
+		} else if (1 == LINKAGE_MTD)
+			add_grp(i, grp_size, max(sim1, sim2));
+		//Single Linkage
+		else if (2 == LINKAGE_MTD)
+			if (min(sim1, sim2) > 0)
+				add_grp(i, grp_size, min(sim1, sim2));
 	}
 
 	size_t new_grp = grp.size();
@@ -369,24 +381,32 @@ size_t merge_grp(size_t group1, size_t group2, double max_sim) {
 	vec_dim2[group1].head = NULL;
 	vec_dim2[group2].head = NULL;
 
-	//遍历每一行链表，更新最大相似度的指向
-	for (size_t i = 0; i < dim1_size; i++) {
-		if (update_max[i]) {
-			sp_unit* u = vec_dim1[i].head;
-			sp_unit* best = NULL;
-			//从左到右遍历，找到最大值
-			while (NULL != u) {
-				if (NULL == best || u->sim > best->sim)
-					best = u;
-				u = u->right;
-			}
-			//必须无条件赋值。旧写法是 `if (u->sim > max)`，max 初值 0，
-			//一旦整行相似度都是 0 就永远不会赋值，vec_dim1[i].max 会保留一个已经被 free 的指针，
-			//下一次 get_max() 就是 heap-use-after-free（见 tests/cases/22_zero_row_max.csv）。
-			//best 仍是“从左到右第一个取得最大值的单元”，并列行为与旧写法一致。
-			vec_dim1[i].max = best;
+	//遍历需要修复 max 指针的行（升序），只遍历本次失效的那几行
+	sort(dirty_max.begin(), dirty_max.end());
+	for (size_t k = 0; k < dirty_max.size(); k++) {
+		size_t i = dirty_max[k];
+		sp_unit* u = vec_dim1[i].head;
+		sp_unit* best = NULL;
+		//从左到右遍历，找到最大值
+		while (NULL != u) {
+			if (NULL == best || u->sim > best->sim)
+				best = u;
+			u = u->right;
 		}
+		//必须无条件赋值。旧写法是 `if (u->sim > max)`，max 初值 0，
+		//一旦整行相似度都是 0 就永远不会赋值，vec_dim1[i].max 会保留一个已经被 free 的指针，
+		//下一次 get_max() 就是 heap-use-after-free（见 tests/cases/22_zero_row_max.csv）。
+		//best 仍是“从左到右第一个取得最大值的单元”，并列行为与旧写法一致。
+		vec_dim1[i].max = best;
 	}
+
+	//复位本次触及过的标记。缓冲跨合并复用，所以这里既不再分配、也不清零整个 O(n) 内存。
+	for (size_t k = 0; k < touched.size(); k++)
+		mark_flags[touched[k]] = 0;
+	touched.clear();
+	updated.clear();
+	dirty_max.clear();
+
 	return grp.size();
 }
 
@@ -411,6 +431,12 @@ void free_mem(void) {
 
 	vec_dim1.clear();
 	vec_dim2.clear();
+
+	//合并过程中复用的缓冲也一并释放
+	mark_flags.clear();
+	updated.clear();
+	dirty_max.clear();
+	touched.clear();
 }
 
 //聚类主过程
