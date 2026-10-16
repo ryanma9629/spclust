@@ -2,7 +2,7 @@
 # Copyright (c) 2022-2026 Ryan Ma <pningma@sina.com>
 
 cmake_minimum_required(VERSION 3.16)
-project(spclust VERSION 0.3.0 LANGUAGES CXX
+project(spclust VERSION 0.3.1 LANGUAGES CXX
         DESCRIPTION "基于稀疏相似度矩阵的凝聚型层次聚类")
 
 # ---------------------------------------------------------------------------
@@ -24,7 +24,7 @@ option(SPCLUST_BUILD_TESTS "构建测试并注册 ctest" ${_spclust_default})
 # ---------------------------------------------------------------------------
 # 库（只有 src/hac.cpp；不依赖 tools/）
 # ---------------------------------------------------------------------------
-add_library(spclust src/hac.cpp)
+add_library(spclust src/hac.cpp src/scipy.cpp)
 add_library(spclust::spclust ALIAS spclust)
 
 target_compile_features(spclust PUBLIC cxx_std_17)
@@ -114,7 +114,11 @@ if(SPCLUST_BUILD_TESTS)
         add_test(NAME cli
                  COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_cli.py
                          --bin ${cli_bin})
-        set_tests_properties(differential cli PROPERTIES
+        # scipy 互操作：把 --scipy 的导出交给真的 scipy 读。没装 numpy/scipy 时自动跳过。
+        add_test(NAME scipy_interop
+                 COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_scipy.py
+                         --bin ${cli_bin})
+        set_tests_properties(differential cli scipy_interop PROPERTIES
                              WORKING_DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR})
     endif()
 endif()

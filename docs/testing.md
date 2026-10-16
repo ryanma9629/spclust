@@ -7,6 +7,7 @@
 | 切树属性测试 | `tests/test_cut.cpp` | 库的三个切树接口 + 多实例 | `PASS=18281` |
 | 差分测试 | `tests/run_tests.py` + `tests/oracle.py` | 合并序列对不对（算法） | `PASS=90 WARN=12 FAIL=0` |
 | CLI 契约测试 | `tests/test_cli.py` | 退出码、选项、输出不变量 | `11/11` |
+| scipy 互操作 | `tests/test_scipy.py` | 格式与语义真的对得上（用真 scipy 当尺子） | 46 组 |
 | 性能回归护栏 | `tests/bench.py` | 变慢没有（防退化） | 5 个用例 |
 
 前三个都在 `make test` / `ctest` 里，第四个是 `make bench`。
@@ -26,6 +27,22 @@
 
 顺带一个结构性证据：`nm libspclust.a` 的 `.data`/`.bss` 里没有算法状态
 （只有字符串与跳转表这类常量），所以多个 `HAC` 对象之间不存在隐藏共享。
+
+## scipy 互操作（换一把外来尺子）
+
+前面几层用的都是我们自己写的 oracle。`tests/test_scipy.py` 换成 scipy —— 一个来源完全不同、
+被广泛使用的实现，检查两件事：**格式合规**（`is_valid_linkage` / `is_monotonic` / `to_tree` /
+`fcluster` 都能直接用）和**语义对得上**（在"没有并列且树完整"的用例上，逐行与
+`scipy.cluster.hierarchy.linkage` 完全相同，含高度与 size）。
+
+关键前提是距离映射选对：本库的"缺失边 = 相似度 0"对应"距离 = C - 相似度"（C = 最大相似度），
+于是 `average` 链接与 scipy 的 `method='average'` 在同一个稠密距离矩阵上等价。
+
+这里也测两条**已知差异**，免得它们某天悄悄变成 bug：
+`MinNonzero` 在稠密输入上必须等于 scipy 的 `complete`（6/6），在稀疏输入上应当不同；
+森林（残缺树）必须在 stderr 上警告，且 `--scipy-bridge` 之后行数恰好 n-1、最后一行 size 恰好 n。
+
+没装 numpy/scipy 时整个测试跳过并返回 0，所以不装也能跑 `make test`。
 
 ## 差分测试
 

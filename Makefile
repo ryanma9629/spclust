@@ -2,7 +2,7 @@
 #
 #   make            构建 ./spclust
 #   make run        构建并跑 sim.csv
-#   make test       差分测试：用独立 oracle 交叉验证 spclust 的正确性
+#   make test       差分测试 + 切树属性测试 + CLI 测试 + scipy 互操作
 #   make check      用三种 linkage 各跑一遍 sim.csv 做对比
 #   make asan       AddressSanitizer + UBSan 构建并运行（强烈建议跑一次）
 #   make asan-cases 用 ASan/UBSan 跑一遍 tests/cases 下全部用例
@@ -38,7 +38,7 @@ DEFS = -DMIN_SIM_CLUST=$(MIN_SIM) -DDEBUG=$(DEBUG)
 
 # 目录结构：库（src/ + include/）与使用者（tools/）分开。
 # 构建系统见 CMakeLists.txt；这个 Makefile 是开发时的快捷方式。
-LIB_SRCS = src/hac.cpp
+LIB_SRCS = src/hac.cpp src/scipy.cpp
 CLI_SRCS = tools/spclust_cli.cpp tools/readdb.cpp
 ALL_SRCS = $(CLI_SRCS) $(LIB_SRCS)
 HDRS = include/spclust/hac.h tools/readdb.h tools/cli_config.h
@@ -49,7 +49,7 @@ BIN  = spclust
 LIB_A    = libspclust.a
 CUT_TEST = cut_property
 
-.PHONY: all lib run test test-cut check asan asan-cases leaks bench bench-update clean help
+.PHONY: all lib run test test-cut test-scipy check asan asan-cases leaks bench bench-update clean help
 
 all: $(BIN)
 
@@ -58,9 +58,11 @@ $(BIN): $(ALL_SRCS) $(HDRS)
 
 # 只把库编成静态库（演示"库"这一层是独立的、不依赖 tools/）
 $(LIB_A): $(LIB_SRCS) $(HDRS)
-	$(CXX) $(CXXFLAGS) $(INCS) $(DEFS) -c $(LIB_SRCS) -o hac.o
-	ar rcs $@ hac.o
-	rm -f hac.o
+	@rm -rf .libobj && mkdir -p .libobj
+	$(CXX) $(CXXFLAGS) $(INCS) $(DEFS) -c $(LIB_SRCS)
+	@mv *.o .libobj/
+	ar rcs $@ .libobj/*.o
+	rm -rf .libobj
 
 lib: $(LIB_A)
 
@@ -72,12 +74,18 @@ run: $(BIN)
 test: $(BIN) test-cut
 	$(PYTHON) tests/run_tests.py --bin ./$(BIN) --min-sim $(MIN_SIM)
 	$(PYTHON) tests/test_cli.py --bin ./$(BIN)
+	$(SCIPY_PYTHON) tests/test_scipy.py --bin ./$(BIN)
 
 $(CUT_TEST): tests/test_cut.cpp $(LIB_SRCS) $(HDRS)
 	$(CXX) $(CXXFLAGS) $(INCS) -o $@ tests/test_cut.cpp $(LIB_SRCS) $(LDLIBS)
 
 test-cut: $(CUT_TEST)
 	./$(CUT_TEST)
+
+# scipy 互操作：把 --scipy 的导出交给真的 scipy 读（没有 scipy 时自动跳过、返回 0）
+SCIPY_PYTHON ?= $(PYTHON)
+test-scipy: $(BIN)
+	$(SCIPY_PYTHON) tests/test_scipy.py --bin ./$(BIN)
 
 # 性能回归护栏：固定生成器的输入 + 交替重复取中位，与 tests/bench_baseline.txt 比。
 # 超出容差只警告，超过 3x 时间 / 2x 内存才失败（机器噪声大，硬判定会误报）。
@@ -125,12 +133,13 @@ leaks: $(BIN)
 	MallocStackLogging=1 leaks --atExit -- ./$(BIN) $(DATA)
 
 clean:
-	rm -f $(BIN) $(BIN)-asan $(LIB_A) $(CUT_TEST) hac.o
+	rm -f $(BIN) $(BIN)-asan $(LIB_A) $(CUT_TEST) *.o
+	rm -rf .libobj
 	rm -rf $(BIN)*.dSYM
 	find . -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null || true
 
 help:
-	@echo "make [all|run|test|test-cut|bench|check|asan|asan-cases|leaks|clean|help]"
+	@echo "make [all|run|test|test-cut|test-scipy|bench|check|asan|asan-cases|leaks|clean|help]"
 	@echo "  LINKAGE=$(LINKAGE)  MIN_SIM=$(MIN_SIM)  DEBUG=$(DEBUG)"
 	@echo "  e.g. make run LINKAGE=1 MIN_SIM=60"
 	@echo "       make test MIN_SIM=70"

@@ -2,6 +2,7 @@
 // Copyright (c) 2022-2026 Ryan Ma <pningma@sina.com>
 
 #include "spclust/hac.h"
+#include "spclust/scipy.h"
 
 #include <algorithm>
 #include <cctype>
@@ -70,6 +71,9 @@ double tree_floor = (double)MIN_SIM_CLUST;
 bool show_tree = false;
 int tree_depth = 6;          // --tree 的深度上限；0 表示不限
 bool show_matrix = false;
+bool show_scipy = false;                 // --scipy：导出 scipy linkage 矩阵
+spclust::DistanceMap scipy_map = spclust::DistanceMap::Complement;
+bool scipy_bridge = false;               // 森林补成一棵树（scipy 要求 n-1 行）
 
 //链接方式。以前这是编译期常量（LINKAGE_MTD），要换就得重编译；现在库里是
 //构造参数，所以一个二进制就能跑三种，也能用 --linkage 在命令行选。
@@ -206,6 +210,31 @@ void print_matrix(void) {
 	}
 }
 
+//scipy 兼容导出：每行 left right distance size。
+//注意 height 是**距离**（越小越先合并），与 --matrix 的相似度相反。
+void print_scipy(void) {
+	spclust::ScipyOptions o;
+	o.map = scipy_map;
+	o.bridge = scipy_bridge;
+	spclust::ScipyExport e = spclust::to_scipy(g_hac->tree(), g_hac->num_objects(), o);
+
+	if (e.n_components > 1 && !e.bridged)
+		cerr << "注意: 合并树是森林（" << e.n_components
+			<< " 个分量，树里没有把它们并起来）—— scipy 要求恰好 n-1 行。"
+			<< "用 --scipy-bridge 补上桥接行，或者用 average/max 链接。" << endl;
+	if (!e.monotonic)
+		cerr << "注意: 距离沿合并序列不是单调递增的（MinNonzero 不保证），"
+			<< "scipy 的 dendrogram/fcluster 假定它单调。" << endl;
+
+	cout << "# scipy linkage matrix: left right distance size" << endl;
+	cout << "# n=" << e.n_objects << " rows=" << e.rows.size()
+		<< " components=" << e.n_components << (e.bridged ? " (bridged)" : "") << endl;
+	cout << setprecision(12);
+	for (size_t i = 0; i < e.rows.size(); i++)
+		cout << e.rows[i].left << " " << e.rows[i].right << " "
+			<< e.rows[i].distance << " " << e.rows[i].size << endl;
+}
+
 void usage(const char* prog) {
 	cerr << "用法: " << prog << " [similarity.csv|-] [选项]" << endl
 	     << "  similarity.csv   输入边表；省略或给 - 表示从标准输入读" << endl
@@ -217,7 +246,10 @@ void usage(const char* prog) {
 	     << "  --tree           打印树状图" << endl
 	     << "  --tree-depth <N> 树状图的深度上限（默认 " << 6 << "，0 = 不限；隐含 --tree）" << endl
 	     << "  --linkage <M>    链接方式：0/average（默认）、1/max|single、2/min|min-nonzero" << endl
-	     << "  --matrix         打印 linkage 矩阵（left right height size）" << endl
+	     << "  --matrix         打印 linkage 矩阵（left right height size，height 是相似度）" << endl
+	     << "  --scipy          导出 scipy.cluster.hierarchy 的 linkage 矩阵（height 是距离）" << endl
+	     << "  --scipy-distance <M>  complement（默认，C-sim）| negate（-sim）| reciprocal（1/sim）" << endl
+	     << "  --scipy-bridge   森林补成一棵树（桥接距离 = inf），scipy 要求恰好 n-1 行" << endl
 	     << "  -h, --help       显示这个" << endl;
 }
 
@@ -281,6 +313,26 @@ int main(int argc, char* argv[]) {
 				return 2;
 			}
 
+		} else if ("--scipy" == a) {
+			show_scipy = true;
+		} else if ("--scipy-distance" == a) {
+			if (++i >= argc) {
+				cerr << "--scipy-distance 需要一个值" << endl;
+				return 2;
+			}
+			const string v = argv[i];
+			if ("complement" == v)
+				scipy_map = spclust::DistanceMap::Complement;
+			else if ("negate" == v)
+				scipy_map = spclust::DistanceMap::Negate;
+			else if ("reciprocal" == v)
+				scipy_map = spclust::DistanceMap::Reciprocal;
+			else {
+				cerr << "未知的距离映射: " << v << "（complement/negate/reciprocal）" << endl;
+				return 2;
+			}
+		} else if ("--scipy-bridge" == a) {
+			scipy_bridge = true;
 		} else if ("--matrix" == a) {
 			show_matrix = true;
 		} else if ("-h" == a || "--help" == a) {
@@ -317,8 +369,8 @@ int main(int argc, char* argv[]) {
 	//这样"只想在更低的阈值处切一刀"不需要额外参数，也不会白白多算。
 	//按簇数 / 簇大小切则必须算完整树（不知道要合并到多低），代价见 usage。
 	if (!floor_given) {
-		if (CUT_SIM != cut_mode)
-			tree_floor = 0.0;
+		if (CUT_SIM != cut_mode || show_scipy)
+			tree_floor = 0.0;   // 要正好 k 个簇 / 最小簇大小 / scipy 矩阵，都得算完整树
 		else if (cut_sim < tree_floor)
 			tree_floor = cut_sim;
 	}
@@ -343,6 +395,8 @@ int main(int argc, char* argv[]) {
 		print_tree();
 	if (show_matrix)
 		print_matrix();
+	if (show_scipy)
+		print_scipy();
 
 	return 0;
 }

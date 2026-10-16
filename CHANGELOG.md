@@ -58,6 +58,36 @@
 单链接 **300x**。主要来源：去掉每次合并的 4 趟 O(n) 全量扫描、`get_max` 改最大堆、
 `init` 改哈希表、去掉 `get_unit` 的线性查找、流式读入、32 字节节点、单链接走 Kruskal。
 
+## [0.3.1] - 2026-10
+
+### Added
+
+- **scipy 互操作**（`include/spclust/scipy.h` + `src/scipy.cpp`）：`to_scipy()` 把合并树
+  导出成 `scipy.cluster.hierarchy` 的 linkage 矩阵；命令行是
+  `spclust_cli data.csv --scipy [--scipy-distance complement|negate|reciprocal] [--scipy-bridge]`。
+  距离映射必须由调用方选（相似度不是距离），默认 `complement`（`C - sim`）是语义上最忠实的
+  一个：本库"缺失边 = 相似度 0"正好对应"距离 = C"，于是 average 链接与 scipy 的
+  `method='average'` 在同一个稠密距离矩阵上等价。
+- `tests/test_scipy.py`：拿**真的 scipy** 当尺子（以前所有测试用的都是我们自己写的 oracle）。
+  23 个用例 × 2 种链接：格式全部合规，且在"没有并列、树完整"的用例上与 scipy 自己的
+  linkage **逐行完全相同**（含高度与 size）。并列用例按契约跳过并注明。
+  没装 numpy/scipy 时自动跳过，返回 0。
+- `make test-scipy`。
+
+### 关于并列的一个发现（写进文档了）
+
+输入值全不相同**也会**出现并列：派生出来的中间相似度会撞在一起。
+`tests/cases/15_many_merges.csv`（28 个输入值互不相同）在第 3 步就有两个候选都等于 82.5，
+我们与 oracle 选了其中一个分支、scipy 选了另一个 —— 三者的树随后都不同，但都合法。
+这正是契约里"并列时合并顺序不作保证"的实际含义。
+
+### 已知差异（不是 bug，测试都钉住了）
+
+- `Linkage::MinNonzero` ≠ scipy 的 `complete`：scipy 在缺失对上取到最大距离（= 相似度 0），
+  稀疏输入下几乎处处为 0；本库只对"两边都存在的边"取最小。**稠密输入下两者相同**（实测 6/6）。
+- 森林（残缺树，行数 < n-1）：scipy 的 `is_valid_linkage` 发现不了（它只会当成一个更小的 n），
+  所以 CLI 在 stderr 上警告，`--scipy-bridge` 可补成完整树。
+
 ## [0.3.0] - 2026-10
 
 这一版**改动了公开 API**（自由函数 → `spclust::HAC` 对象），因为之前的接口有一个

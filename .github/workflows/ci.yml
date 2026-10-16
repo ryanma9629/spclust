@@ -15,6 +15,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: scipy 互操作要用到它（没有就让该测试自动跳过）
+        run: python3 -m pip install --quiet --disable-pip-version-check numpy scipy
+
       - name: Configure
         run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 

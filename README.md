@@ -28,6 +28,7 @@ make lib        # 只把库编成 libspclust.a
 make run        # 跑 sim.csv
 make test       # 差分测试 + 切树属性测试 + CLI 测试
 make test-cut   # 只跑切树属性测试
+make test-scipy # 只跑 scipy 互操作（没装 scipy 会自动跳过）
 make bench      # 性能回归护栏（固定输入 + 记录的基线）
 make check      # 三种 linkage 各跑一遍做对比
 make asan       # AddressSanitizer + UBSan
@@ -118,6 +119,40 @@ spclust_cli data.csv --floor 0        # 把树算到最底部（完整树；默�
 **注意 `height` 是相似度（越大越先合并），scipy 用的是距离。**
 `--cut` / `--floor` 的语义与成本见 [docs/design.md](docs/design.md)。
 
+## 与 scipy 互操作
+
+```bash
+spclust_cli data.csv --scipy --scipy-bridge > Z.txt
+```
+```python
+from scipy.cluster.hierarchy import fcluster, dendrogram, to_tree
+import numpy as np
+Z = np.loadtxt("Z.txt")          # 直接就是 scipy 的 linkage 矩阵
+fcluster(Z, 3, criterion='maxclust')
+```
+
+`height` 在 scipy 里是**距离**（越小越先合并），本库内部是**相似度**（越大越先合并），
+所以导出必须选一个映射（`--scipy-distance`）：
+
+- `complement`（默认）`dist = C - sim`，`C` = 最大相似度。**这是语义上最忠实的一个**：
+  本库的"缺失边 = 相似度 0"正好对应"距离 = C"，于是 `average` 链接等价于 scipy 的
+  `method='average'` 作用在同一个稠密距离矩阵上 —— 实测在**没有并列**的用例上与
+  scipy 逐行完全相同（`tests/test_scipy.py`，23 组）。
+- `negate` `dist = -sim`，保序、无参，但距离为负。
+- `reciprocal` `dist = 1/sim`，只对"相似度像亲和度"的数据有意义。
+
+**三点要知道的差异**（不是 bug，是语义不同，`tests/test_scipy.py` 里都钉住了）：
+
+1. **并列**。相似度相等时合并顺序本就不作保证。注意这包括**派生值**：输入 28 个值全不同，
+   中间算出来的相似度照样会撞在一起（`15_many_merges.csv` 就是这样）。并列时两边树不同，
+   但都合法。
+2. **`MinNonzero` ≠ scipy 的 `complete`**。scipy 在缺失对上取到最大距离（= 相似度 0），
+   稀疏输入下几乎处处为 0；本库只对"两边都存在的边"取最小。**稠密输入下两者相同**（实测 6/6）。
+3. **森林**。`MinNonzero` 下两簇之间没有边时这个 pair 连候选都不是，分量可能永远合不起来，
+   于是树不是完整树（行数 < n-1）。scipy 要求恰好 n-1 行，所以要么用 `--scipy-bridge`
+   补桥接行（`complement` 下桥接距离就是 `C`，正是 scipy 自己会算出的值），要么换链接方式。
+   不加 `--scipy-bridge` 时会在 stderr 上警告。
+
 ## 文档
 
 | 文件 | 内容 |
@@ -125,7 +160,7 @@ spclust_cli data.csv --floor 0        # 把树算到最底部（完整树；默�
 | [docs/design.md](docs/design.md) | 数据结构、算法流程、可调参数 |
 | [docs/known-issues.md](docs/known-issues.md) | 修过的 bug（含发现过程）+ 仍存在的问题 |
 | [docs/performance.md](docs/performance.md) | 性能实测、被实测否掉的优化、方法学教训 |
-| [docs/testing.md](docs/testing.md) | 差分测试 / CLI 测试 / 性能护栏的设计 |
+| [docs/testing.md](docs/testing.md) | 切树属性测试 / 差分测试 / CLI 测试 / scipy 互操作 / 性能护栏 |
 | [CHANGELOG.md](CHANGELOG.md) | 对使用者有意义的变化 |
 
 ## 测试与性能的量级
@@ -137,6 +172,9 @@ spclust_cli data.csv --floor 0        # 把树算到最底部（完整树；默�
   **从合并树自底向上收集叶子集合**算出——另一条代码路径。覆盖三种链接 × 21 个随机图 ×
   并列阈值 / 正好 k 个簇 / 最小簇大小 / 紧致度归属 / 单调性，外加多实例与 reset 复用。
   当前 `PASS=18281 FAIL=0`。
+- scipy 互操作（`tests/test_scipy.py`）：把 `--scipy` 的导出交给**真的 scipy** 读。
+  23 个用例 × 2 种链接，格式全部合规，且在**没有并列**的用例上与 scipy 自己的
+  `linkage` **逐行完全相同**；并列用例按契约跳过并标注。
 - ASan/UBSan 干净、0 泄漏；节点池手工毒化，所以"读已释放节点"仍能被 ASan 抓到。
 - 累计性能（对比最开始的基线，详见 [docs/performance.md](docs/performance.md)）：
   800k 边 **21.9x**、2M 边 **51.1x**，峰值内存 **−55~61%**；单链接 **300x**。
