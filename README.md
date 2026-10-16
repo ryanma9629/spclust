@@ -41,10 +41,9 @@ clust_grp()                       spclust.cpp
 3. 摘除并释放 group1/group2 的整行整列，做四向指针 splice，最后释放中心节点。
 4. 重扫受影响的行，修复 `max` 指针；把新组的成员列表与组内平均相似度写进 `grp`。
 
-## 构建与运行（macOS）
+## 构建与运行
 
-不需要安装任何 C++ 运行时 —— Apple 的 libc++ 是操作系统自带的。
-只需要 Xcode Command Line Tools（`xcode-select --install`），它提供 `clang++`、`make`、`lldb`。
+只用了标准库，没有第三方依赖：一个 C++ 编译器（≥ C++17）加 `make` 就够，不需要额外安装任何运行时。
 
 ```bash
 make                # 构建 ./spclust
@@ -54,12 +53,12 @@ make bench          # 性能回归护栏（固定输入 + 记录的基线）
 make check          # 用三种 linkage 各跑一遍做对比
 make asan           # AddressSanitizer + UBSan（强烈建议跑一次）
 make asan-cases     # 用 ASan/UBSan 跑遍 tests/cases 全部用例
-make leaks          # macOS 自带 leaks 工具查内存泄漏
+make leaks          # 查内存泄漏
 make clean
 make help
 ```
 
-只用了标准库，没有第三方依赖，`g++`/`c++` 都能编，`-std=c++11` 也可以。
+`clang++` 与 `g++` 都能编，`-std=c++11` 也可以。
 
 ## 输入格式
 
@@ -241,7 +240,8 @@ runner 静默地少算（本项目就发生过：Kruskal 路径忘了打印那�
 所以现在用最快的用例 `bench_small` 当探针：它与基线偏差超过 ±30% 时，**本次与基线的比较
 一律不作结论**，提示重跑或重记基线。
 
-环境：Apple M5 / Darwin 27.0.0，**机器空闲时记录**。当前基线：
+基线在**机器空闲时记录**（`tests/bench_baseline.txt` 里会记下生成它的机器，换机器后
+`make bench` 会提示数字不可直接比）。当前基线：
 
 | 用例 | 配置 | 中位墙钟 | 峰值 RSS |
 |---|---|---|---|
@@ -281,11 +281,15 @@ make run MIN_SIM=0 LINKAGE=0                  # hmm，MIN_SIM=0 只改默认；�
 | `DEBUG_FREQ_READDB` | 10000 | 读数据的进度打印频度 |
 | `DEBUG_FREQ_CLUST` | 100 | 聚类进度打印频度（建议 >=100） |
 
-## 与原 Windows/ODBC 版本的差异
+## 与上游原版的差异
 
-原版用 `<windows.h>` + `_tmain` + ODBC 从 MySQL 的 `test.sim100` 读数据，只能在 Windows/MSVC 下编译。
-移植阶段 `spclust.cpp` **一行未改**；之后四次改动动了它：相似度精度、`get_max` 的 UAF、
-把每次合并的 4 趟 O(n) 全量扫描改成 O(degree)、把 `get_max` 换成最大堆（见「已修复」和「性能实测」）：
+这份实现源自一个从数据库直读边表的版本（ODBC + `<windows.h>` + `_tmain`），只能在特定的
+编译环境里构建。现在的读取端是 CSV / 标准输入（见 `readdb.cpp`），`main.h` 里保留了
+`#ifdef _WIN32` 分支以便按需接回原来的 ODBC 读取路径。
+
+`spclust.cpp` 的核心改动是四件事：相似度精度（`unsigned short` → `double`）、`get_max` 的
+use-after-free、把每次合并的 4 趟 O(n) 全量扫描改成 O(degree)、把 `get_max` 换成最大堆
+（见「已修复」和「性能实测」）：
 
 | 文件 | 改动 |
 |---|---|
@@ -293,7 +297,7 @@ make run MIN_SIM=0 LINKAGE=0                  # hmm，MIN_SIM=0 只改默认；�
 | `main.cpp` | `_tmain(argc, _TCHAR* argv[])` → `main(argc, char* argv[])`；支持可选输入文件参数；打印结果（原来那段被注释掉了） |
 | `readdb.h` | 签名由 `readdb(void)` 改为 `readdb(const char* path, edge_handler)`（流式回调）；删掉 ODBC 专用的 `odbc_show_err` |
 | `readdb.cpp` | 整个 ODBC 读取换成 CSV / 标准输入读取，并改成"小批量流式"（不再缓存全部边）；不再有 `char obj1[32]` 的截断限制 |
-| `spclust.cpp` / `spclust.h` | 精度修复（`unsigned short` → `double`）、`get_max` 的 UAF、增量下标遍历替代全量扫描、`get_max` 改版本号懒删除最大堆、`init_grp` 换 `unordered_map`、去掉 `get_unit` 的线性查找、链接改下标 + 32 字节节点池 |
+| `spclust.cpp` / `spclust.h` | 精度修复、`get_max` 的 UAF、增量下标遍历替代全量扫描、`get_max` 改版本号懒删除最大堆、`init_grp` 换 `unordered_map`、去掉 `get_unit` 的线性查找、链接改下标 + 32 字节节点池、记录合并树（`--cut`/`--tree`）、单链接走 Kruskal、min 链接的紧致度初值 |
 | `Makefile` / `sim.csv` / `.gitignore` | 新增 |
 | `tests/` | 新增：独立 oracle + 22 个边界用例 + 差分测试 runner |
 
@@ -554,7 +558,7 @@ sizeof(sp_unit):  4*8(指针) + 2*4(组号) + 8(sim) = 48   ->   4*4(链接) + 2
    现在 `SP_NONE = 0`、0 号节点永不出借，既和值初始化一致，分支也更少。
 
 2. **池用 `malloc`/`realloc` 直接管，不要用 `std::vector`。**
-   vector 扩容是"新块 + 拷贝 + 释放旧块"，而 macOS 的分配器不会立刻把大块还给系统，
+   vector 扩容是"新块 + 拷贝 + 释放旧块"，而系统的分配器不会立刻把大块还给操作系统，
    于是每次搬迁都留下一个常驻的中间块：按 1.25 倍扩要 **150 MB**（而节点总共才 26 MB！），
    按 2 倍扩也要 85 MB。`realloc` 对大块常常能原地扩张，既不拷贝也不产生中间块，
    峰值直接降到 63 MB。
@@ -681,7 +685,7 @@ O(k²) —— 在 k≈38 时比 introsort 慢 7 倍，整体慢 21%。这个数�
 
 原因有两层，现在都清楚了：
 
-- 采样画像里 **malloc/free 相关帧合计只占约 2%**，macOS 的小对象分配器本身就很快；
+- 采样画像里 **malloc/free 相关帧合计只占约 2%**，小对象分配器本身就很快；
 - 更根本的是：**池不改变 `sizeof(sp_unit)`**，也就是不改变每个节点跨多少个 cache line。
   而节点尺寸是一阶因素（把节点撑到 128 字节会慢 1.17x，压到 32 字节会快 1.4~1.5x）。
   所以"换分配器"没用、"压小节点"才有用 —— 这两个实验的结果并不矛盾。
@@ -705,11 +709,11 @@ O(k²) —— 在 k≈38 时比 introsort 慢 7 倍，整体慢 21%。这个数�
 3. **画像是用 `sample` 采样，不是插桩。** 用 `clock()` 给 `get_unit`/`add_grp` 插桩，
    这两个函数被调用几百万次，插桩本身加入了一千三百万次 `clock()` 调用 ——
    实测总时间从 0.72 s 涨到 3.00 s，占比数据全失真
-   （`sample $(pgrep -n spclust) 3 -f out.txt`）。
+   （用系统自带的采样器，如 `sample`、`perf record` 都行）。
 
 ## 性能实测
 
-环境：Apple M 系列，`-O2`。
+编译选项：`-O2`。
 
 **读这一节时注意**：绝对墙钟受机器负载影响很大 —— 同一份代码在忙/热与空闲时能差 2 倍
 （见下面「性能回归护栏」里的哨兵）。**相对比值是交替执行测出来的，可信**；绝对数字只在
