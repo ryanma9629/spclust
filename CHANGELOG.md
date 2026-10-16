@@ -1,150 +1,185 @@
 # Changelog
 
-格式参考 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循
-[语义化版本](https://semver.org/lang/zh-CN/)。
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and version
+numbers follow [Semantic Versioning](https://semver.org/).
 
-本文件记录对使用者有意义的变化。逐条的实现细节（含每次性能改动的实测数据与方法学修正）
-在 git 历史里，每个提交都是独立可回滚的。
-
-## [0.2.0] - 2026-10
-
-库与使用者的分离（自由函数 API）。
-
-### Added
-- **库与使用者分离**：`include/spclust/hac.h` + `src/hac.cpp` 是库本体（不依赖任何东西、
-  只认整数 id、不打印、不读文件）；`tools/` 是它的第一个使用者，负责所有 IO 与展示。
-- **CMake**：`find_package(spclust)` + `spclust::spclust` + `install` + `ctest`；
-  `SPCLUST_LINKAGE` / `SPCLUST_BUILD_TOOLS` / `SPCLUST_BUILD_TESTS` 选项。
-  `Makefile` 保留作开发时的快捷方式。
-- 库公开接口：`reserve` / `add_edge` / `build` / `num_objects` / `tree` / `cut` / `reset` /
-  `linkage_name`；切树（`Cut`）现在也在库里（原来在 CLI 的匿名命名空间里，那属于核心功能）。
-- `docs/`：设计、已修复与已知问题、性能实测、测试四份文档；README 只讲"怎么用"。
-- GitHub Actions CI：两个平台 × (构建 + ctest + ASan/UBSan 全用例 + 只编库)。
-- 完整的合并树输出：`--cut <X>`（把树切在相似度 X 处）、`--floor <X>`（树算到多低）、
-  `--tree` / `--tree-depth <N>`（树状图）、`--matrix`（linkage 矩阵 `left right height size`）。
-  阈值不再是停止条件，而是切树位置 —— 换阈值不需要重新聚类。
-- 性能回归护栏：`make bench`（固定输入 + 记录基线 + 机器状态哨兵）、`make bench-update`。
-- CLI 接口测试：`tests/test_cli.py`，覆盖退出码契约、切树与 oracle 的一致性、
-  `--matrix` 结构不变量、`--tree` 完整性、stdin 等价性。
-- 差分测试套件：`tests/oracle.py`（独立的按定义实现的参考实现，不含 Lance-Williams 递推）
-  + `tests/run_tests.py`（逐次合并比对）+ 22 个手写边界用例。
-- `LICENSE`（MIT）与每个源文件的 SPDX 头。
-
-### Changed
-- 库不再持有对象名：`add_edge(a, b, sim)` 收整数 id，`id ↔ 名字` 的映射归 CLI。
-  库也不再有任何标准输出（原来每次合并的调试日志会打到 stdout）。
-- 库内部不再 `exit()`：内存分配失败抛 `std::bad_alloc`，参数非法抛 `std::invalid_argument`。
-- 相似度从 `unsigned short` 改为 `double`。原实现每步整数除法截断、误差向下累积，
-  实测会把不同的相似度压成同一个值而产生并列，**改变最终簇数**。
-- 单链接（`LINKAGE_MTD == 1`）改走 Kruskal：单链接的簇间相似度就是两个簇之间所有
-  **原始边**的最大值，所以整棵树等价于"边按相似度降序 + 并查集"，不需要相似度矩阵。
-  实测 63~300x（随规模），峰值内存从 15.8 GB 降到 50 MB（n=80000 / 800k 边）。
-- 重复 pair 的语义定清为**取最大值**（此前是未定义行为）。
-- 读取端改为**小批量流式**：不再把全部边缓存进内存，峰值内存下降 40~49%。
-- 节点从 48 字节压到 32 字节（链接与组号改存 `uint32` 下标），峰值内存再降 ~18%，
-  同时快 1.4~1.5x。
-- `readdb` 不再内部 `exit(1)`：失败时返回 0（原因写 stderr），退出码交给调用方。
-- 头文件不再 `using namespace std;`；`grp` 不再是跨文件的全局变量。
-- `LINKAGE_MTD == 2` 的紧致度报告此前恒为 0（`min(...)` 的吸收元），现在报告簇内最小边。
-
-### Fixed
-- `get_max()` 的 heap-use-after-free：某行的相似度全为 0 时，max 指针不会被重新赋值，
-  会保留一个已释放的节点。默认的 average 链接 + 一条 `sim=0` 的输入边即可触发。
-  （差分测试对这个输入报 PASS —— 只有 ASan 抓到了它。）
-- 未使用的 `MIN_ACCT_NUM` / `MIN_SIM_WG` 宏已删除。
-
-### Performance
-累计（对比最初的基线）：800k 边合计 **21.9x**、2M 边 **51.1x**；峰值内存 **-55~61%**。
-单链接 **300x**。主要来源：去掉每次合并的 4 趟 O(n) 全量扫描、`get_max` 改最大堆、
-`init` 改哈希表、去掉 `get_unit` 的线性查找、流式读入、32 字节节点、单链接走 Kruskal。
+This file records changes that matter to users. Per-change implementation detail (including
+the measurements behind every performance change and the methodology corrections) lives in
+the git history, where each commit is independently revertible.
 
 ## [0.3.2] - 2026-10
 
 ### Added
 
-- **C 接口**（`include/spclust/spclust_c.h`）：纯 C 头文件，给 FFI 用
-  （Rust / Go / Python ctypes / C 项目）。不透明句柄、两段式输出
-  （先问长度再填缓冲）、`spclust_status` 错误码、线程局部的 `spclust_last_error()`。
-  覆盖链接方式、三种切法、scipy 导出。
-  **C++ 异常绝不穿过 C 边界**：每个入口 try/catch 转成错误码，所以从别的语言传非法输入
-  只会拿到错误码，不会把宿主进程 abort 掉。
-- `tests/test_c_api.c`（用**C 编译器**编，顺带证明头文件是纯 C）+ `tests/test_c_api.py`
-  （ctypes 调共享库，验证 dlopen / 符号名 / 结构体布局 / 异常边界）。
-- `make test-c`、`make lib-shared`（`libspclust.so`）。
+- **C interface** (`include/spclust/spclust_c.h`): a plain C header for FFI (Rust / Go /
+  Python ctypes / C projects). Opaque handles, two-call output (ask for the length, then
+  fill the buffer), `spclust_status` error codes, and a thread-local
+  `spclust_last_error()`. It covers the linkage, all three cut modes and the scipy export.
+  **C++ exceptions never cross the C boundary**: every entry point try/catches into an error
+  code, so bad input from another language yields a status, never an aborted host process.
+- `tests/test_c_api.c` (compiled by a **C compiler**, which also proves the header is plain
+  C) plus `tests/test_c_api.py` (ctypes against the shared library, checking dlopen, symbol
+  names, struct layout and the exception boundary).
+- `make test-c` and `make lib-shared` (`libspclust.so`).
 
 ## [0.3.1] - 2026-10
 
 ### Added
 
-- **scipy 互操作**（`include/spclust/scipy.h` + `src/scipy.cpp`）：`to_scipy()` 把合并树
-  导出成 `scipy.cluster.hierarchy` 的 linkage 矩阵；命令行是
-  `spclust_cli data.csv --scipy [--scipy-distance complement|negate|reciprocal] [--scipy-bridge]`。
-  距离映射必须由调用方选（相似度不是距离），默认 `complement`（`C - sim`）是语义上最忠实的
-  一个：本库"缺失边 = 相似度 0"正好对应"距离 = C"，于是 average 链接与 scipy 的
-  `method='average'` 在同一个稠密距离矩阵上等价。
-- `tests/test_scipy.py`：拿**真的 scipy** 当尺子（以前所有测试用的都是我们自己写的 oracle）。
-  23 个用例 × 2 种链接：格式全部合规，且在"没有并列、树完整"的用例上与 scipy 自己的
-  linkage **逐行完全相同**（含高度与 size）。并列用例按契约跳过并注明。
-  没装 numpy/scipy 时自动跳过，返回 0。
-- `make test-scipy`。
+- **scipy interop** (`include/spclust/scipy.h` + `src/scipy.cpp`): `to_scipy()` exports the
+  merge tree as a `scipy.cluster.hierarchy` linkage matrix; from the command line it is
+  `spclust_cli data.csv --scipy [--scipy-distance complement|negate|reciprocal]
+  [--scipy-bridge]`. The distance mapping has to be chosen by the caller (a similarity is not
+  a distance); the default `complement` (`C - sim`) is the most faithful one, because
+  "an absent edge is similarity 0" corresponds exactly to "distance = C", which makes average
+  linkage equivalent to scipy's `method='average'` on the same dense distance matrix.
+- `tests/test_scipy.py`: uses the **real scipy** as the ruler (every earlier test used an
+  oracle we wrote ourselves). 23 cases x 2 linkages: all format-valid, and on the
+  tie-free, complete-tree cases **row-for-row identical** to scipy's own `linkage`, heights
+  and sizes included. Tie cases are skipped as the contract allows and labelled. Without
+  numpy/scipy the test skips itself and returns 0.
+- `make test-scipy`.
 
-### 关于并列的一个发现（写进文档了）
+### One finding about ties (now documented)
 
-输入值全不相同**也会**出现并列：派生出来的中间相似度会撞在一起。
-`tests/cases/15_many_merges.csv`（28 个输入值互不相同）在第 3 步就有两个候选都等于 82.5，
-我们与 oracle 选了其中一个分支、scipy 选了另一个 —— 三者的树随后都不同，但都合法。
-这正是契约里"并列时合并顺序不作保证"的实际含义。
+Distinct input values can still tie: derived intermediate similarities collide.
+`tests/cases/15_many_merges.csv` (28 distinct input values) has two candidates both equal to
+82.5 at step 3; the oracle and we picked one branch and scipy picked the other, after which
+all three trees differ - and all three are legal. That is what "the merge order of tied
+similarities is unspecified" actually means.
 
-### 已知差异（不是 bug，测试都钉住了）
+### Known differences (not bugs; both pinned by tests)
 
-- `Linkage::MinNonzero` ≠ scipy 的 `complete`：scipy 在缺失对上取到最大距离（= 相似度 0），
-  稀疏输入下几乎处处为 0；本库只对"两边都存在的边"取最小。**稠密输入下两者相同**（实测 6/6）。
-- 森林（残缺树，行数 < n-1）：scipy 的 `is_valid_linkage` 发现不了（它只会当成一个更小的 n），
-  所以 CLI 在 stderr 上警告，`--scipy-bridge` 可补成完整树。
+- `Linkage::MinNonzero` is not scipy's `complete`: scipy reaches the maximum distance
+  (= similarity 0) on missing pairs, so on sparse input almost everything looks far apart,
+  while this library takes the minimum only over pairs where both sides have an edge. **On
+  dense input the two agree** (measured 6/6).
+- A forest (an incomplete tree, fewer than n-1 rows) is invisible to scipy's
+  `is_valid_linkage`, which simply treats it as a smaller n. The CLI therefore warns on
+  stderr, and `--scipy-bridge` appends the missing merges.
 
 ## [0.3.0] - 2026-10
 
-这一版**改动了公开 API**（自由函数 → `spclust::HAC` 对象），因为之前的接口有一个
-根本限制：状态是 34 个文件静态变量，**一个进程只能跑一次聚类**，而且换链接方式
-要重新编译整个库。
+This release **changed the public API** (free functions -> a `spclust::HAC` object), because
+the previous interface had a fundamental limit: the state was 34 file-static variables, so
+**one process could run exactly one clustering**, and changing the linkage meant recompiling
+the whole library.
 
 ### Changed
 
-- **`class spclust::HAC` 取代原来的自由函数**（`reserve` / `add_edge` / `build` /
-  `num_objects` / `tree` / `cut` / `reset` / `linkage_name` 都成了它的成员）。
-  一个对象一份状态：同一进程可有任意多个聚类，交错使用互不影响；库里不再有可变全局量
-  （`nm libspclust.a` 里 `.data`/`.bss` 无算法状态），所以只要不共享同一个对象，
-  多线程安全。
-- **链接方式从编译期 `#define LINKAGE_MTD` 变成构造参数 `spclust::Linkage`**：
-  `Average` / `MaxSimilarity` / `MinNonzero`。以前要三个二进制才能跑三种链接，
-  现在一个二进制就够（`spclust_cli --linkage 0|1|2`）。分派只在公开入口发生，
-  热路径上不留分支 —— 实测代价 0.2~0.6%（交替 A/B，最小/四分位/中位一致）。
-- **链接方式的名字按语义定稿**。原来代码里的注释是反的（`max` 注释成 complete、
-  `min` 注释成 single），现在以行为为准：`max` = 单链接（走 Kruskal）、
-  `min` = "仅对两边都存在的边取最小"，所以显式命名 `MinNonzero` 而不是 complete。
-- `cut()` 变成纯函数：并查集的父数组改成局部量（原来是文件静态量，于是 `cut()`
-  名义上 `const` 却在改全局状态，并发切树会互相踩）。
-- 命令行工具：新增 `--linkage`、`--n-clusters <K>`、`--min-size <M>`；
-  `--n-clusters` / `--min-size` 需要完整树，没给 `--floor` 时会自动用 `--floor 0`。
-- CMake 的 `SPCLUST_LINKAGE` 选项删除（不再需要）；`SPCLUST_BUILD_TOOLS` /
-  `SPCLUST_BUILD_TESTS` 现在用 `option()`，所以 `-D...=OFF` 真的生效
-  （之前用 `set()`，会把用户传的 OFF 覆盖掉）。
+- **`class spclust::HAC` replaces the free functions** (`reserve` / `add_edge` / `build` /
+  `num_objects` / `tree` / `cut` / `reset` / `linkage_name` are now members). One object is
+  one state: a process can hold any number of clusterings and interleaving them changes
+  nothing. The library has no mutable globals left (no algorithm state in `.data`/`.bss`
+  according to `nm libspclust.a`), so it is thread-safe as long as no single object is shared.
+- **The linkage went from the compile-time `#define LINKAGE_MTD` to a constructor argument
+  `spclust::Linkage`**: `Average` / `MaxSimilarity` / `MinNonzero`. Three binaries used to be
+  needed to exercise three linkages; one now suffices (`spclust_cli --linkage 0|1|2`).
+  Dispatch happens only at the public entry points and leaves no branch in the hot path -
+  measured cost 0.2-0.6% (alternating A/B, min/quartile/median agreeing).
+- **The linkage names were settled by behaviour.** The comments in the original code were
+  wrong (it called max "complete" and min "single"); behaviour wins: max is single linkage
+  (through Kruskal) and min takes the minimum only over pairs where both sides have an edge,
+  which is why it is named `MinNonzero` rather than complete.
+- `cut()` became a pure function: the union-find parent array is now a local. It used to be a
+  file static, so `cut()` was nominally `const` while mutating global state and concurrent
+  cuts corrupted each other.
+- Command line: added `--linkage`, `--n-clusters <K>` and `--min-size <M>`. The latter two
+  need the full tree, so without an explicit `--floor` they use `--floor 0` automatically.
+- The CMake `SPCLUST_LINKAGE` option was removed (no longer needed), and
+  `SPCLUST_BUILD_TOOLS` / `SPCLUST_BUILD_TESTS` now use `option()`, so `-D...=OFF` really
+  takes effect (it used to be `set()`, which overwrote a user's OFF).
 
 ### Added
 
-- `Cut cut_n_clusters(std::size_t k)`：要正好 k 个簇（= 树的前 n-k 次合并）。
-- `Cut cut_min_size(std::size_t m)`：合并到没有小于 m 的簇为止（满足条件的**最浅**切法，
-  不是"丢掉小簇"）。
-- `tests/test_cut.cpp`：库级切树属性测试。期望值用**从合并树自底向上收集叶子集合**
-  独立算出（不是把并查集再写一遍），覆盖三种链接 × 21 个随机图 × 并列阈值 /
-  k 个簇 / 最小簇大小 / 紧致度归属 / 单调性，外加**多实例与 reset 复用**。
-  当前 `PASS=18281 FAIL=0`。
-- `make test-cut`。
+- `Cut cut_n_clusters(std::size_t k)`: exactly k clusters (= the first n-k merges).
+- `Cut cut_min_size(std::size_t m)`: merge until no cluster is smaller than m (the
+  **shallowest** cut satisfying that, not "discard small clusters").
+- `tests/test_cut.cpp`: a library-level cut property test. Its expectations are derived
+  independently by **collecting leaf sets bottom-up from the merge tree** (not by writing the
+  union-find a second time), covering three linkages x 21 random graphs x tied thresholds,
+  k clusters, minimum cluster size, cohesion provenance and monotonicity, plus **multiple
+  instances and reset reuse**. Currently `PASS=18281 FAIL=0`.
+- `make test-cut`.
 
 ### Fixed
 
-- `docs/design.md` 里的链接方式命名与流程图（原来写的是 `LINKAGE_MTD` 和旧函数名）。
+- The linkage names and the flow diagram in `docs/design.md` (they still said `LINKAGE_MTD`
+  and the old function names).
+
+## [0.2.0] - 2026-10
+
+Separating the library from its user (still with the free-function API).
+
+### Added
+
+- **Library and user split**: `include/spclust/hac.h` + `src/hac.cpp` are the library itself
+  (no dependencies, integer ids only, prints nothing, reads no files); `tools/` is its first
+  user and owns all IO and presentation.
+- **CMake**: `find_package(spclust)` + `spclust::spclust` + `install` + `ctest`, with
+  `SPCLUST_BUILD_TOOLS` / `SPCLUST_BUILD_TESTS` options. The `Makefile` stays as a
+  development shortcut.
+- Public API: `reserve` / `add_edge` / `build` / `num_objects` / `tree` / `cut` / `reset` /
+  `linkage_name`. Cutting (`Cut`) moved into the library as well; it had been sitting in the
+  CLI's anonymous namespace while being core functionality.
+- `docs/`: four documents covering design, fixed/open issues, measurements and testing; the
+  README only explains how to use the thing.
+- GitHub Actions CI: two platforms x (build + ctest + ASan/UBSan over all cases + a
+  library-only build).
+- Full merge-tree output: `--cut <X>` (cut at similarity X), `--floor <X>` (how deep to
+  compute), `--tree` / `--tree-depth <N>` (dendrogram), `--matrix` (the linkage matrix
+  `left right height size`). The threshold is no longer a stopping condition but a cut
+  position, so changing it never re-clusters.
+- Performance guard: `make bench` (fixed inputs + recorded baseline + a machine-state canary)
+  and `make bench-update`.
+- CLI interface tests (`tests/test_cli.py`): exit-code contract, cut agreement with the
+  oracle, `--matrix` structural invariants, `--tree` completeness, stdin equivalence.
+- Differential test suite: `tests/oracle.py` (an independent implementation written from the
+  definition, with no Lance-Williams recurrence) + `tests/run_tests.py` (merge-by-merge
+  comparison) + 22 hand-written boundary cases.
+- `LICENSE` (MIT) and an SPDX header on every source file.
+
+### Changed
+
+- The library no longer stores object names: `add_edge(a, b, sim)` takes integer ids and the
+  id-to-name mapping belongs to the CLI. It also has no standard output any more (the
+  per-merge debug log used to go to stdout).
+- The library no longer calls `exit()`: allocation failure throws `std::bad_alloc` and invalid
+  arguments throw `std::invalid_argument`.
+- Similarities went from `unsigned short` to `double`. The original truncated with integer
+  division at every step, so error accumulated downwards, collapsing distinct similarities
+  into ties and **changing the final cluster count**.
+- Single linkage (`LINKAGE_MTD == 1`) now goes through Kruskal: its inter-cluster similarity
+  is the maximum over all **original edges**, so the whole tree equals "sort edges by
+  similarity descending, then union-find" with no similarity matrix at all. Measured 63-300x
+  depending on scale, with peak memory dropping from 15.8 GB to 50 MB (n=80000, 800k edges).
+- Duplicate-pair semantics settled as **the maximum wins** (previously undefined behaviour).
+- The reader became **streaming in small batches**: the whole edge list is no longer buffered
+  in memory, cutting peak memory by 40-49%.
+- Nodes shrank from 48 to 32 bytes (links and group numbers stored as `uint32` indices),
+  cutting peak memory by a further ~18% while running 1.4-1.5x faster.
+- `readdb` no longer calls `exit(1)` internally: it returns 0 on failure (with the reason on
+  stderr) and lets the caller decide the exit code.
+- Headers no longer contain `using namespace std;`, and `grp` is no longer a cross-file global.
+- The cohesion report for `LINKAGE_MTD == 2` used to be identically 0 (the absorbing element
+  of `min(...)`); it now reports the smallest intra-cluster edge.
+
+### Fixed
+
+- A heap-use-after-free in `get_max()`: when a whole row had similarity 0 the max pointer was
+  never reassigned and kept pointing at a freed node. The default average linkage plus one
+  input edge with `sim=0` is enough to trigger it. (The differential test reported PASS for
+  that input - only ASan caught it.)
+- The unused `MIN_ACCT_NUM` / `MIN_SIM_WG` macros were removed.
+
+### Performance
+
+Cumulative against the original baseline: 800k edges **21.9x**, 2M edges **51.1x**, peak
+memory **-55 to -61%**, single linkage **300x**. The main contributors: removing four O(n)
+sweeps per merge, turning `get_max` into a max-heap, hashing in `init`, eliminating
+`get_unit`'s linear search, streaming input, 32-byte nodes, and Kruskal for single linkage.
 
 ## [0.1.0] - 2026-10
 
-最初可用状态：把 2022 年的 Windows/ODBC 版本改成可移植（CSV / 标准输入）、建立差分测试套件。
+First usable state: the 2022 Windows/ODBC version made portable (CSV / standard input), plus
+the differential test suite.
